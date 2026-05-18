@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "huygens"
+version = "0.1.0"
+description = "CLI for Elegoo Saturn 4 Ultra 12K (SDCP protocol)"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+huygens = "huygens.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["huygens*"]
