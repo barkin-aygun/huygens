@@ -1,3 +1,5 @@
+import os
+
 import click
 
 from . import config, printer
@@ -8,6 +10,35 @@ def _fmt_ms(ms: int) -> str:
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
     return f"{h}h {m:02d}m {sec:02d}s" if h else f"{m}m {sec:02d}s"
+
+
+def _resolve_printer(timeout: float = 5.0) -> dict:
+    """Return saved config, or auto-discover if none is saved."""
+    cfg = config.load()
+    if cfg is not None:
+        return cfg
+
+    click.echo("No saved printer — scanning network…")
+    try:
+        printers = printer.discover(timeout=timeout)
+    except OSError as e:
+        raise SystemExit(str(e))
+
+    if not printers:
+        raise SystemExit("No printers found. Run `huygens discover` to save one.")
+    if len(printers) == 1:
+        p = printers[0]
+        click.echo(f"Found: {p.name} ({p.ip})")
+        return p.to_dict()
+
+    for i, p in enumerate(printers):
+        click.echo(f"  [{i + 1}] {p.name} ({p.ip})")
+    idx = click.prompt(
+        "Multiple printers found — which one?",
+        type=click.IntRange(1, len(printers)),
+        default=1,
+    )
+    return printers[idx - 1].to_dict()
 
 
 @click.group()
@@ -103,17 +134,26 @@ def print_status(timeout):
 
     if s.filename:
         click.echo(f"File:            {s.filename}")
+    if s.task_id:
+        click.echo(f"Task ID:         {s.task_id}")
     if s.total_layers:
-        click.echo(f"Layer:           {s.current_layer} / {s.total_layers}  ({s.progress_pct:.1f}%)")
+        bar_width = 30
+        filled = int(bar_width * s.current_layer / s.total_layers)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        click.echo(f"Progress:        [{bar}] {s.progress_pct:.1f}%  (layer {s.current_layer} / {s.total_layers})")
     if s.elapsed_ms or s.total_ms:
         click.echo(f"Elapsed:         {_fmt_ms(s.elapsed_ms)}")
         if s.total_ms:
-            click.echo(f"Estimated total: {_fmt_ms(s.total_ms)}")
-            click.echo(f"Remaining:       {_fmt_ms(s.remaining_ms)}")
+            click.echo(f"Remaining:       {_fmt_ms(s.remaining_ms)}  (total {_fmt_ms(s.total_ms)})")
     if s.uv_led_temp is not None:
-        click.echo(f"UV LED temp:     {s.uv_led_temp}°C")
+        click.echo(f"UV LED temp:     {s.uv_led_temp:.1f}°C")
     if s.box_temp is not None:
-        click.echo(f"Box temp:        {s.box_temp}°C")
+        click.echo(f"Box temp:        {s.box_temp:.1f}°C")
+    if s.release_film_count:
+        click.echo(f"FEP cycles:      {s.release_film_count:,}")
+    click.echo(f"Timelapse:       {s.timelapse_label}")
+    if s.error_number:
+        click.echo(f"Error:           {s.error_label}")
 
 
 # ---------------------------------------------------------------------------
@@ -183,3 +223,41 @@ def files(path, timeout):
         for e in file_list:
             size_mb = e.used_size / (1024 * 1024) if e.used_size else 0
             click.echo(f"  {e.name}  ({size_mb:.1f} MB)  [{e.storage_label}]")
+
+
+# ---------------------------------------------------------------------------
+# upload
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("file", type=click.Path(exists=True, readable=True, dir_okay=False))
+@click.option("--dest", "-d", default="/local/", show_default=True,
+              help="Destination directory on the printer.")
+@click.option("--timeout", "-t", default=120.0, show_default=True,
+              help="Seconds to wait for the upload to complete.")
+def upload(file, dest, timeout):
+    """Upload FILE (.ctb) to the printer's storage."""
+    cfg = _resolve_printer()
+    filename = os.path.basename(file)
+    file_size = os.path.getsize(file)
+    size_mb = file_size / (1024 * 1024)
+
+    click.echo(f"Uploading {filename} ({size_mb:.1f} MB) to {cfg['name']} ({cfg['ip']})…")
+
+    with click.progressbar(length=file_size, label="  Progress", width=40) as bar:
+        last = [0]
+
+        def on_progress(sent, total):
+            bar.update(sent - last[0])
+            last[0] = sent
+
+        try:
+            printer.upload_file(cfg["ip"], file, dest, timeout, on_progress)
+        except TimeoutError:
+            raise SystemExit("Upload timed out.")
+        except OSError as e:
+            raise SystemExit(f"Connection failed: {e}")
+        except RuntimeError as e:
+            raise SystemExit(str(e))
+
+    click.echo(f"Done: {filename}")

@@ -4,6 +4,7 @@ All functions return plain dataclasses or raise descriptive exceptions.
 Neither the CLI nor a future GUI should need to touch _transport directly.
 """
 
+import os
 from dataclasses import dataclass, field
 
 from . import _transport
@@ -56,6 +57,21 @@ PRINT_STATUS_LABELS = {
     10: "Checking file",
 }
 
+PRINT_ERROR_LABELS = {
+    0: "None",
+    1: "Temperature too high",
+    2: "Motor fault",
+    4: "Media IO error",
+    8: "Projector fault",
+    16: "Fan fault",
+    32: "Resin level low",
+}
+
+TIMELAPSE_STATUS_LABELS = {
+    0: "Off",
+    1: "Recording",
+}
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -90,6 +106,10 @@ class PrintStatus:
     total_ms: int
     uv_led_temp: float | None
     box_temp: float | None
+    release_film_count: int
+    timelapse_status: int
+    error_number: int
+    task_id: str | None
 
     @property
     def machine_status_label(self) -> str:
@@ -98,6 +118,14 @@ class PrintStatus:
     @property
     def print_status_label(self) -> str:
         return PRINT_STATUS_LABELS.get(self.print_status, f"Unknown ({self.print_status})")
+
+    @property
+    def error_label(self) -> str:
+        return PRINT_ERROR_LABELS.get(self.error_number, f"Error {self.error_number}")
+
+    @property
+    def timelapse_label(self) -> str:
+        return TIMELAPSE_STATUS_LABELS.get(self.timelapse_status, f"Unknown ({self.timelapse_status})")
 
     @property
     def remaining_ms(self) -> int:
@@ -165,6 +193,10 @@ def get_status(ip: str, mainboard_id: str, timeout: float = 10.0) -> PrintStatus
         total_ms=print_info.get("TotalTicks", 0),
         uv_led_temp=raw.get("TempOfUVLED"),
         box_temp=raw.get("TempOfBox"),
+        release_film_count=raw.get("ReleaseFilm", 0),
+        timelapse_status=raw.get("TimeLapseStatus", 0),
+        error_number=print_info.get("ErrorNumber", 0),
+        task_id=print_info.get("TaskId") or None,
     )
 
 
@@ -184,6 +216,18 @@ def start_print(
     ack = resp.get("Data", {}).get("Ack", resp.get("Ack", 0))
     if ack != 0:
         raise ValueError(ACK_ERRORS.get(ack, f"Printer error (Ack={ack})"))
+
+
+def upload_file(
+    ip: str,
+    local_path: str,
+    remote_dir: str = "/local/",
+    timeout: float = 60.0,
+    on_progress=None,
+) -> None:
+    """Upload a .ctb file to the printer's storage."""
+    filename = os.path.basename(local_path)
+    _transport.http_upload(ip, local_path, filename, timeout, on_progress)
 
 
 def list_files(

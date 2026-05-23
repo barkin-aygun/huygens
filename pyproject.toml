@@ -9,6 +9,7 @@ description = "CLI for Elegoo Saturn 4 Ultra 12K (SDCP protocol)"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.1",
+    "requests>=2.28",
     "websockets>=12.0",
 ]
 
