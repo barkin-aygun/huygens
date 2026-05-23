@@ -391,15 +391,20 @@ setInterval(poll, POLL_MS);
 
 
 # ---------------------------------------------------------------------------
-# Video URL discovery via SDCP CMD 386
+# Video stream control via SDCP CMD 386
 # ---------------------------------------------------------------------------
 
-def fetch_video_url(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | None:
-    """Ask the printer for its RTSP stream URL via CMD 386."""
+def start_video(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | None:
+    """Send Enable=1, return RTSP URL or None on failure."""
     try:
-        return _printer.get_video_url(ip, mainboard_id, timeout)
-    except Exception:
+        return _printer.start_video_stream(ip, mainboard_id, timeout)
+    except Exception as e:
         return None
+
+
+def stop_video(ip: str, mainboard_id: str) -> None:
+    """Send Enable=0 to release the printer's one connection slot."""
+    _printer.stop_video_stream(ip, mainboard_id)
 
 
 # ---------------------------------------------------------------------------
@@ -413,8 +418,10 @@ class _HLSTranscoder:
     One RTSP session stays open for the lifetime of the server.
     """
 
-    def __init__(self, rtsp_url: str):
+    def __init__(self, rtsp_url: str, ip: str, mainboard_id: str):
         self._url = rtsp_url
+        self._ip = ip
+        self._mid = mainboard_id
         self._dir = tempfile.mkdtemp(prefix="huygens_hls_")
         self._playlist = os.path.join(self._dir, "stream.m3u8")
         self._stop = threading.Event()
@@ -435,6 +442,7 @@ class _HLSTranscoder:
 
     def _cleanup(self):
         self._stop.set()
+        _printer.stop_video_stream(self._ip, self._mid)
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def _loop(self):
@@ -512,7 +520,7 @@ class _StatusPoller:
 def create_app(cfg: dict, video_url: str | None) -> Flask:
     app = Flask(__name__)
     poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"])
-    hls = _HLSTranscoder(video_url) if video_url else None
+    hls = _HLSTranscoder(video_url, cfg["ip"], cfg["mainboard_id"]) if video_url else None
 
     @app.route("/")
     def dashboard():

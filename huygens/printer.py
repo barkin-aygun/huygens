@@ -13,10 +13,15 @@ from . import _transport
 # Cmd constants
 # ---------------------------------------------------------------------------
 
-CMD_STATUS = 0
-CMD_START_PRINT = 128
-CMD_LIST_FILES = 258
-CMD_VIDEO_URL = 386
+CMD_STATUS       = 0
+CMD_START_PRINT  = 128
+CMD_PAUSE_PRINT  = 129
+CMD_STOP_PRINT   = 130
+CMD_RESUME_PRINT = 131
+CMD_LIST_FILES   = 258
+CMD_DELETE_FILES = 259
+CMD_VIDEO        = 386
+CMD_TIMELAPSE    = 387
 
 # ---------------------------------------------------------------------------
 # Ack error map (shared across commands)
@@ -231,13 +236,32 @@ def upload_file(
     _transport.http_upload(ip, local_path, filename, timeout, on_progress)
 
 
-def get_video_url(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | None:
-    """Ask the printer for its RTSP video stream URL (CMD 386)."""
-    resp = _transport.ws_command(ip, mainboard_id, CMD_VIDEO_URL, {}, timeout)
-    ack = resp.get("Data", {}).get("Ack", resp.get("Ack", -1))
+VIDEO_ACK_ERRORS = {
+    1: "Max video connections exceeded",
+    2: "Camera unavailable",
+    3: "Unknown error",
+}
+
+
+def start_video_stream(ip: str, mainboard_id: str, timeout: float = 10.0) -> str:
+    """Enable the RTSP stream and return its URL. Raises ValueError on failure."""
+    resp = _transport.ws_command(ip, mainboard_id, CMD_VIDEO, {"Enable": 1}, timeout)
+    data = resp.get("Data", resp)
+    ack = data.get("Ack", -1)
     if ack != 0:
-        return None
-    return resp.get("Data", {}).get("VideoUrl") or resp.get("VideoUrl")
+        raise ValueError(VIDEO_ACK_ERRORS.get(ack, f"Video error (Ack={ack})"))
+    url = data.get("VideoUrl")
+    if not url:
+        raise ValueError("Printer returned no VideoUrl")
+    return url
+
+
+def stop_video_stream(ip: str, mainboard_id: str, timeout: float = 5.0) -> None:
+    """Disable the RTSP stream, releasing the printer's connection slot."""
+    try:
+        _transport.ws_command(ip, mainboard_id, CMD_VIDEO, {"Enable": 0}, timeout)
+    except Exception:
+        pass
 
 
 def list_files(
