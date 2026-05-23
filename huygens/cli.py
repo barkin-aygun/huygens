@@ -245,12 +245,12 @@ def serve(port, host, video_url, open_browser):
     cfg = _resolve_printer()
 
     if video_url is None:
-        click.echo("Probing for video feed…", nl=False)
-        video_url = server.probe_video_url(cfg["ip"])
+        click.echo("Fetching video URL from printer…", nl=False)
+        video_url = server.fetch_video_url(cfg["ip"], cfg["mainboard_id"])
         if video_url:
-            click.echo(f" found at {video_url}")
+            click.echo(f" {video_url}")
         else:
-            click.echo(" none found (use --video-url to specify)")
+            click.echo(" not available (use --video-url to override)")
 
     app = server.create_app(cfg, video_url)
 

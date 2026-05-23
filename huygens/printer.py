@@ -16,6 +16,7 @@ from . import _transport
 CMD_STATUS = 0
 CMD_START_PRINT = 128
 CMD_LIST_FILES = 258
+CMD_VIDEO_URL = 386
 
 # ---------------------------------------------------------------------------
 # Ack error map (shared across commands)
@@ -228,6 +229,15 @@ def upload_file(
     """Upload a .ctb file to the printer's storage."""
     filename = os.path.basename(local_path)
     _transport.http_upload(ip, local_path, filename, timeout, on_progress)
+
+
+def get_video_url(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | None:
+    """Ask the printer for its RTSP video stream URL (CMD 386)."""
+    resp = _transport.ws_command(ip, mainboard_id, CMD_VIDEO_URL, {}, timeout)
+    ack = resp.get("Data", {}).get("Ack", resp.get("Ack", -1))
+    if ack != 0:
+        return None
+    return resp.get("Data", {}).get("VideoUrl") or resp.get("VideoUrl")
 
 
 def list_files(

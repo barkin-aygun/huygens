@@ -3,6 +3,7 @@
 import threading
 import time
 
+import av as _av
 import requests as _requests
 from flask import Flask, Response, jsonify, render_template_string
 
@@ -209,7 +210,7 @@ _DASHBOARD = """<!DOCTYPE html>
 <main>
   <div class="video-pane">
     {% if has_video %}
-    <img id="webcam" src="/video" alt="Webcam">
+    <img id="webcam" alt="Webcam">
     {% else %}
     <div class="no-video">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
@@ -357,12 +358,14 @@ async function poll() {
   }
 }
 
-// Webcam reconnect on error
+// 1fps snapshot refresh — new URL each tick so browser doesn't cache
 const webcam = document.getElementById('webcam');
+function refreshWebcam() {
+  if (webcam) webcam.src = '/snapshot?' + Date.now();
+}
 if (webcam) {
-  webcam.onerror = () => {
-    setTimeout(() => { webcam.src = '/video?' + Date.now(); }, 3000);
-  };
+  refreshWebcam();
+  setInterval(refreshWebcam, 1000);
 }
 
 poll();
@@ -373,29 +376,35 @@ setInterval(poll, POLL_MS);
 
 
 # ---------------------------------------------------------------------------
-# Video URL probe
+# Video URL discovery via SDCP CMD 386
 # ---------------------------------------------------------------------------
 
-_VIDEO_CANDIDATES = [
-    "http://{ip}:8080/?action=stream",
-    "http://{ip}:8080/video",
-    "http://{ip}:8080/",
-    "http://{ip}:4408/video",
-]
+def fetch_video_url(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | None:
+    """Ask the printer for its RTSP stream URL via CMD 386."""
+    try:
+        return _printer.get_video_url(ip, mainboard_id, timeout)
+    except Exception:
+        return None
 
 
-def probe_video_url(ip: str, timeout: float = 3.0) -> str | None:
-    for template in _VIDEO_CANDIDATES:
-        url = template.format(ip=ip)
-        try:
-            r = _requests.get(url, stream=True, timeout=timeout)
-            ct = r.headers.get("Content-Type", "")
-            r.close()
-            if any(k in ct for k in ("multipart", "video", "jpeg", "image")):
-                return url
-        except Exception:
-            pass
-    return None
+# ---------------------------------------------------------------------------
+# RTSP → JPEG snapshot (one frame, connection closed immediately)
+# ---------------------------------------------------------------------------
+
+def _grab_jpeg(rtsp_url: str) -> bytes:
+    """Open the RTSP stream, decode one frame, return it as JPEG bytes."""
+    container = _av.open(rtsp_url, options={"rtsp_transport": "tcp"})
+    try:
+        in_stream = container.streams.video[0]
+        frame = next(container.decode(in_stream))
+        encoder = _av.CodecContext.create("mjpeg", "w")
+        encoder.width = in_stream.width
+        encoder.height = in_stream.height
+        encoder.pix_fmt = "yuvj420p"
+        packets = list(encoder.encode(frame.reformat(format="yuvj420p")))
+        return bytes(packets[0])
+    finally:
+        container.close()
 
 
 # ---------------------------------------------------------------------------
@@ -448,25 +457,15 @@ def create_app(cfg: dict, video_url: str | None) -> Flask:
             has_video=video_url is not None,
         )
 
-    @app.route("/video")
-    def video():
+    @app.route("/snapshot")
+    def snapshot():
         if not video_url:
             return "No video URL configured", 404
-
-        upstream = _requests.get(video_url, stream=True, timeout=(5, None))
-        content_type = upstream.headers.get(
-            "Content-Type", "multipart/x-mixed-replace; boundary=frame"
-        )
-
-        def generate():
-            try:
-                for chunk in upstream.iter_content(chunk_size=8192):
-                    if chunk:
-                        yield chunk
-            finally:
-                upstream.close()
-
-        return Response(generate(), mimetype=content_type)
+        try:
+            jpeg = _grab_jpeg(video_url)
+            return Response(jpeg, mimetype="image/jpeg")
+        except Exception as e:
+            return str(e), 502
 
     @app.route("/api/status")
     def api_status():
