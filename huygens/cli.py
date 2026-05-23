@@ -226,6 +226,51 @@ def files(path, timeout):
 
 
 # ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--port", "-p", default=8888, show_default=True,
+              help="Local port to serve the dashboard on.")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Interface to bind (0.0.0.0 for LAN access).")
+@click.option("--video-url", default=None,
+              help="MJPEG stream URL. Auto-probed if omitted.")
+@click.option("--open/--no-open", "open_browser", default=True, show_default=True,
+              help="Open dashboard in the browser automatically.")
+def serve(port, host, video_url, open_browser):
+    """Start the web dashboard for the printer."""
+    from . import server
+
+    cfg = _resolve_printer()
+
+    if video_url is None:
+        click.echo("Probing for video feed…", nl=False)
+        video_url = server.probe_video_url(cfg["ip"])
+        if video_url:
+            click.echo(f" found at {video_url}")
+        else:
+            click.echo(" none found (use --video-url to specify)")
+
+    app = server.create_app(cfg, video_url)
+
+    url = f"http://{host}:{port}"
+    click.echo(f"Dashboard: {url}")
+    click.echo("Press Ctrl+C to stop.")
+
+    if open_browser:
+        import threading
+        import webbrowser
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    import logging
+    log = logging.getLogger("werkzeug")
+    log.setLevel(logging.ERROR)
+
+    app.run(host=host, port=port, threaded=True, debug=False)
+
+
+# ---------------------------------------------------------------------------
 # upload
 # ---------------------------------------------------------------------------
 
