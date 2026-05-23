@@ -1,11 +1,15 @@
 """Flask web dashboard for the Huygens printer CLI."""
 
+import atexit
+import os
+import shutil
+import tempfile
 import threading
 import time
 
 import av as _av
 import requests as _requests
-from flask import Flask, Response, jsonify, render_template_string
+from flask import Flask, Response, jsonify, render_template_string, send_from_directory
 
 from . import printer as _printer
 
@@ -19,6 +23,7 @@ _DASHBOARD = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ name }} — Huygens</title>
+  {% if has_video %}<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>{% endif %}
   <style>
     :root {
       --bg:      #0d1117;
@@ -60,9 +65,10 @@ _DASHBOARD = """<!DOCTYPE html>
       background: var(--muted); flex-shrink: 0;
       transition: background 0.4s, box-shadow 0.4s;
     }
-    .dot.printing { background: var(--green); box-shadow: 0 0 7px var(--green); }
+    .dot.printing { background: var(--green);  box-shadow: 0 0 7px var(--green); }
     .dot.idle     { background: var(--muted); }
-    .dot.error    { background: var(--red);   box-shadow: 0 0 7px var(--red); }
+    .dot.offline  { background: var(--orange); }
+    .dot.error    { background: var(--red);    box-shadow: 0 0 7px var(--red); }
     .header-right { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 16px; }
 
     /* ── Main layout ── */
@@ -82,7 +88,7 @@ _DASHBOARD = """<!DOCTYPE html>
       justify-content: center;
       overflow: hidden;
     }
-    .video-pane img {
+    .video-pane video, .video-pane img {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
@@ -210,7 +216,7 @@ _DASHBOARD = """<!DOCTYPE html>
 <main>
   <div class="video-pane">
     {% if has_video %}
-    <img id="webcam" alt="Webcam">
+    <video id="webcam" autoplay muted playsinline></video>
     {% else %}
     <div class="no-video">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
@@ -255,15 +261,19 @@ function fmtMs(ms) {
 function render(d) {
   // Header dot
   const dot = document.getElementById('hdr-dot');
-  dot.className = 'dot ' + (d.error_number ? 'error' : d.machine_status === 1 ? 'printing' : 'idle');
-  document.getElementById('hdr-updated').textContent = new Date().toLocaleTimeString();
+  dot.className = 'dot ' + (d.offline ? 'offline' : d.error_number ? 'error' : d.machine_status === 1 ? 'printing' : 'idle');
+  const updated = document.getElementById('hdr-updated');
+  updated.textContent = d.offline
+    ? 'Offline — last seen ' + new Date().toLocaleTimeString()
+    : 'Updated ' + new Date().toLocaleTimeString();
+  updated.style.color = d.offline ? 'var(--orange)' : '';
   document.getElementById('ftr-fw').textContent = d.firmware_version ? `Firmware ${d.firmware_version}` : '';
 
   let html = '';
 
   // Status card
-  html += `<div class="card">
-    <div class="card-title">Status</div>
+  html += `<div class="card" ${d.offline ? 'style="opacity:.6"' : ''}>
+    <div class="card-title">Status${d.offline ? ' &nbsp;<span style="color:var(--orange);font-weight:400;text-transform:none;letter-spacing:0">· offline</span>' : ''}</div>
     <div class="row">
       <span class="row-label">Machine</span>
       <span class="row-value">${badge(d.machine_status_label, MACHINE_CLS[d.machine_status] || 'm')}</span>
@@ -346,26 +356,31 @@ async function poll() {
     const resp = await fetch('/api/status');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const d = await resp.json();
-    if (d.error) {
+    if (d.error && !d.offline) {
+      // No cached data yet — still connecting
       document.getElementById('status-pane').innerHTML =
-        `<div class="card error-banner">&#9888; ${d.error}</div>`;
+        `<div class="card" style="color:var(--muted);text-align:center;padding:32px">${d.error}</div>`;
     } else {
       render(d);
     }
   } catch (e) {
-    document.getElementById('status-pane').innerHTML =
-      `<div class="card error-banner">Connection lost: ${e.message}</div>`;
+    // Dashboard server itself unreachable
+    document.getElementById('hdr-dot').className = 'dot error';
+    document.getElementById('hdr-updated').textContent = 'Dashboard unreachable';
   }
 }
 
-// 1fps snapshot refresh — new URL each tick so browser doesn't cache
-const webcam = document.getElementById('webcam');
-function refreshWebcam() {
-  if (webcam) webcam.src = '/snapshot?' + Date.now();
-}
-if (webcam) {
-  refreshWebcam();
-  setInterval(refreshWebcam, 1000);
+// HLS video player
+const videoEl = document.getElementById('webcam');
+if (videoEl) {
+  const src = '/stream/stream.m3u8';
+  if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+    const hls = new Hls({ lowLatencyMode: true });
+    hls.loadSource(src);
+    hls.attachMedia(videoEl);
+  } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+    videoEl.src = src;
+  }
 }
 
 poll();
@@ -388,23 +403,74 @@ def fetch_video_url(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | 
 
 
 # ---------------------------------------------------------------------------
-# RTSP → JPEG snapshot (one frame, connection closed immediately)
+# RTSP → HLS transcoder (stream-copy, one persistent connection)
 # ---------------------------------------------------------------------------
 
-def _grab_jpeg(rtsp_url: str) -> bytes:
-    """Open the RTSP stream, decode one frame, return it as JPEG bytes."""
-    container = _av.open(rtsp_url, options={"rtsp_transport": "tcp"})
-    try:
-        in_stream = container.streams.video[0]
-        frame = next(container.decode(in_stream))
-        encoder = _av.CodecContext.create("mjpeg", "w")
-        encoder.width = in_stream.width
-        encoder.height = in_stream.height
-        encoder.pix_fmt = "yuvj420p"
-        packets = list(encoder.encode(frame.reformat(format="yuvj420p")))
-        return bytes(packets[0])
-    finally:
-        container.close()
+class _HLSTranscoder:
+    """Remux RTSP into HLS segments in a temp directory.
+
+    Uses stream-copy (no decode/encode), so CPU overhead is negligible.
+    One RTSP session stays open for the lifetime of the server.
+    """
+
+    def __init__(self, rtsp_url: str):
+        self._url = rtsp_url
+        self._dir = tempfile.mkdtemp(prefix="huygens_hls_")
+        self._playlist = os.path.join(self._dir, "stream.m3u8")
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        atexit.register(self._cleanup)
+
+    @property
+    def directory(self) -> str:
+        return self._dir
+
+    @property
+    def ready(self) -> bool:
+        return os.path.exists(self._playlist)
+
+    def stop(self):
+        self._stop.set()
+
+    def _cleanup(self):
+        self._stop.set()
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self._transcode()
+            except Exception:
+                if not self._stop.is_set():
+                    time.sleep(5)
+
+    def _transcode(self):
+        inc = _av.open(self._url, options={"rtsp_transport": "tcp"})
+        outc = _av.open(
+            self._playlist,
+            mode="w",
+            format="hls",
+            options={
+                "hls_time": "2",
+                "hls_list_size": "5",
+                "hls_flags": "delete_segments+append_list",
+                "hls_segment_filename": os.path.join(self._dir, "seg%05d.ts"),
+            },
+        )
+        in_stream = inc.streams.video[0]
+        out_stream = outc.add_stream(template=in_stream)
+        try:
+            for packet in inc.demux(in_stream):
+                if self._stop.is_set():
+                    break
+                if packet.dts is None:
+                    continue
+                packet.stream = out_stream
+                outc.mux(packet)
+        finally:
+            outc.close()
+            inc.close()
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +484,7 @@ class _StatusPoller:
         self._interval = interval
         self._lock = threading.Lock()
         self._data = None
-        self._error = None
+        self._offline = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -428,15 +494,15 @@ class _StatusPoller:
                 s = _printer.get_status(self._ip, self._mid)
                 with self._lock:
                     self._data = s
-                    self._error = None
-            except Exception as e:
+                    self._offline = False
+            except Exception:
                 with self._lock:
-                    self._error = str(e)
+                    self._offline = True
             time.sleep(self._interval)
 
     def get(self):
         with self._lock:
-            return self._data, self._error
+            return self._data, self._offline
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +512,7 @@ class _StatusPoller:
 def create_app(cfg: dict, video_url: str | None) -> Flask:
     app = Flask(__name__)
     poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"])
+    hls = _HLSTranscoder(video_url) if video_url else None
 
     @app.route("/")
     def dashboard():
@@ -457,24 +524,22 @@ def create_app(cfg: dict, video_url: str | None) -> Flask:
             has_video=video_url is not None,
         )
 
-    @app.route("/snapshot")
-    def snapshot():
-        if not video_url:
+    @app.route("/stream/<path:filename>")
+    def stream_file(filename):
+        if not hls:
             return "No video URL configured", 404
-        try:
-            jpeg = _grab_jpeg(video_url)
-            return Response(jpeg, mimetype="image/jpeg")
-        except Exception as e:
-            return str(e), 502
+        if not hls.ready:
+            return "Stream not ready yet", 503
+        return send_from_directory(hls.directory, filename)
 
     @app.route("/api/status")
     def api_status():
-        s, err = poller.get()
-        if err:
-            return jsonify({"error": err})
+        s, offline = poller.get()
         if s is None:
-            return jsonify({"error": "Waiting for first response…"})
+            return jsonify({"offline": True, "error": "Connecting…"})
+
         return jsonify({
+            "offline":              offline,
             "machine_status":       s.machine_status,
             "machine_status_label": s.machine_status_label,
             "print_status":         s.print_status,
