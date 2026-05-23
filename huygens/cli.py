@@ -244,14 +244,6 @@ def serve(port, host, video_url, open_browser):
 
     cfg = _resolve_printer()
 
-    if video_url is None:
-        click.echo("Starting video stream…", nl=False)
-        video_url = server.start_video(cfg["ip"], cfg["mainboard_id"])
-        if video_url:
-            click.echo(f" {video_url}")
-        else:
-            click.echo(" not available (camera disconnected or printer idle)")
-
     app = server.create_app(cfg, video_url)
 
     url = f"http://{host}:{port}"

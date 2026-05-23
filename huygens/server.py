@@ -23,7 +23,7 @@ _DASHBOARD = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ name }} — Huygens</title>
-  {% if has_video %}<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>{% endif %}
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     :root {
       --bg:      #0d1117;
@@ -94,13 +94,24 @@ _DASHBOARD = """<!DOCTYPE html>
       object-fit: contain;
       display: block;
     }
-    .no-video {
-      color: var(--muted);
-      text-align: center;
+    .video-overlay {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 16px; color: var(--muted); text-align: center;
     }
-    .no-video svg { opacity: .4; margin-bottom: 12px; }
-    .no-video p { font-size: 13px; }
-    .no-video code { font-size: 12px; background: var(--surface); padding: 2px 6px; border-radius: 4px; }
+    .video-overlay svg { opacity: .3; }
+    .video-overlay p { font-size: 13px; }
+    .stream-btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 22px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text);
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .stream-btn:hover  { background: #21262d; border-color: var(--blue); color: var(--blue); }
+    .stream-btn:active { background: #161b22; }
+    .stream-btn:disabled { opacity: .45; cursor: not-allowed; }
+    .stream-btn.active { border-color: var(--red); color: var(--red); }
+    .stream-btn.active:hover { background: rgba(248,81,73,.08); }
 
     /* ── Status pane ── */
     .status-pane {
@@ -215,17 +226,17 @@ _DASHBOARD = """<!DOCTYPE html>
 
 <main>
   <div class="video-pane">
-    {% if has_video %}
-    <video id="webcam" autoplay muted playsinline></video>
-    {% else %}
-    <div class="no-video">
+    <video id="webcam" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;"></video>
+    <div class="video-overlay" id="video-overlay">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
         <path d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9A2.25 2.25 0 0013.5 5.25h-9A2.25 2.25 0 002.25 9v9A2.25 2.25 0 004.5 18.75z"/>
       </svg>
-      <p>No video feed</p>
-      <p style="margin-top:6px;"><code>--video-url URL</code> to enable</p>
+      <button class="stream-btn" id="stream-btn" onclick="toggleStream()">
+        <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M3 2.5v11l10-5.5L3 2.5z"/></svg>
+        Start Stream
+      </button>
+      <p id="stream-msg" style="font-size:12px;min-height:1em"></p>
     </div>
-    {% endif %}
   </div>
 
   <div class="status-pane" id="status-pane">
@@ -370,17 +381,70 @@ async function poll() {
   }
 }
 
-// HLS video player
-const videoEl = document.getElementById('webcam');
-if (videoEl) {
-  const src = '/stream/stream.m3u8';
-  if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-    const hls = new Hls({ lowLatencyMode: true });
-    hls.loadSource(src);
-    hls.attachMedia(videoEl);
-  } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-    videoEl.src = src;
+// ── Video stream toggle ──
+let _hls = null;
+let _streaming = false;
+
+function _setStreamUI(active, msg) {
+  const btn = document.getElementById('stream-btn');
+  const overlay = document.getElementById('video-overlay');
+  const video = document.getElementById('webcam');
+  const msgEl = document.getElementById('stream-msg');
+  if (active) {
+    btn.innerHTML = '<svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5 3.5h2v9H5zm4 0h2v9H9z"/></svg> Stop Stream';
+    btn.classList.add('active');
+    overlay.style.display = 'none';
+    video.style.display = 'block';
+  } else {
+    btn.innerHTML = '<svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M3 2.5v11l10-5.5L3 2.5z"/></svg> Start Stream';
+    btn.classList.remove('active');
+    overlay.style.display = 'flex';
+    video.style.display = 'none';
   }
+  if (msgEl) msgEl.textContent = msg || '';
+}
+
+function _startHLS() {
+  const video = document.getElementById('webcam');
+  const src = '/stream/stream.m3u8';
+  if (Hls.isSupported()) {
+    _hls = new Hls({ lowLatencyMode: true });
+    _hls.loadSource(src);
+    _hls.attachMedia(video);
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = src;
+  }
+}
+
+function _stopHLS() {
+  if (_hls) { _hls.destroy(); _hls = null; }
+  const video = document.getElementById('webcam');
+  video.src = '';
+}
+
+async function toggleStream() {
+  const btn = document.getElementById('stream-btn');
+  btn.disabled = true;
+
+  if (_streaming) {
+    _stopHLS();
+    _streaming = false;
+    _setStreamUI(false, '');
+    await fetch('/api/video/stop', { method: 'POST' });
+  } else {
+    document.getElementById('stream-msg').textContent = 'Starting…';
+    const resp = await fetch('/api/video/start', { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById('stream-msg').textContent = data.error;
+    } else {
+      _streaming = true;
+      _setStreamUI(true);
+      _startHLS();
+    }
+  }
+
+  btn.disabled = false;
 }
 
 poll();
@@ -517,10 +581,10 @@ class _StatusPoller:
 # Flask app factory
 # ---------------------------------------------------------------------------
 
-def create_app(cfg: dict, video_url: str | None) -> Flask:
+def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     app = Flask(__name__)
     poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"])
-    hls = _HLSTranscoder(video_url, cfg["ip"], cfg["mainboard_id"]) if video_url else None
+    _hls = [None]  # mutable box so inner functions can reassign
 
     @app.route("/")
     def dashboard():
@@ -529,16 +593,34 @@ def create_app(cfg: dict, video_url: str | None) -> Flask:
             name=cfg["name"],
             ip=cfg["ip"],
             model=cfg.get("machine_name", ""),
-            has_video=video_url is not None,
         )
+
+    @app.route("/api/video/start", methods=["POST"])
+    def video_start():
+        if _hls[0] is not None:
+            return jsonify({"ok": True})
+        try:
+            url = video_url or _printer.start_video_stream(cfg["ip"], cfg["mainboard_id"])
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        _hls[0] = _HLSTranscoder(url, cfg["ip"], cfg["mainboard_id"])
+        return jsonify({"ok": True})
+
+    @app.route("/api/video/stop", methods=["POST"])
+    def video_stop():
+        if _hls[0]:
+            _hls[0].stop()
+            _hls[0] = None
+        _printer.stop_video_stream(cfg["ip"], cfg["mainboard_id"])
+        return jsonify({"ok": True})
 
     @app.route("/stream/<path:filename>")
     def stream_file(filename):
-        if not hls:
-            return "No video URL configured", 404
-        if not hls.ready:
+        if not _hls[0]:
+            return "Stream not active", 404
+        if not _hls[0].ready:
             return "Stream not ready yet", 503
-        return send_from_directory(hls.directory, filename)
+        return send_from_directory(_hls[0].directory, filename)
 
     @app.route("/api/status")
     def api_status():
