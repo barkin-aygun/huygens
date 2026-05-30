@@ -188,6 +188,37 @@ def print_start(filename, start_layer, timeout):
 
 
 # ---------------------------------------------------------------------------
+# print-pause / print-resume / print-stop
+# ---------------------------------------------------------------------------
+
+def _print_control_cmd(action: str, past: str, fn, confirm: bool):
+    @cli.command(f"print-{action}")
+    @click.option("--timeout", "-t", default=10.0, show_default=True,
+                  help="Seconds to wait for the printer response.")
+    @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+    def _cmd(timeout, yes):
+        cfg = config.require()
+        if confirm and not yes:
+            click.confirm(f"{action.capitalize()} the current print on {cfg['name']}?", abort=True)
+        try:
+            fn(cfg["ip"], cfg["mainboard_id"], timeout)
+        except TimeoutError:
+            raise SystemExit("Timed out waiting for printer response.")
+        except OSError as e:
+            raise SystemExit(f"Connection failed: {e}")
+        except ValueError as e:
+            raise SystemExit(f"Printer rejected the request: {e}")
+        click.echo(f"Print {past}.")
+    _cmd.__doc__ = f"{action.capitalize()} the current print job."
+    return _cmd
+
+
+_print_control_cmd("pause", "paused", lambda *a: printer.pause_print(*a), confirm=False)
+_print_control_cmd("resume", "resumed", lambda *a: printer.resume_print(*a), confirm=False)
+_print_control_cmd("stop", "stopped", lambda *a: printer.stop_print(*a), confirm=True)
+
+
+# ---------------------------------------------------------------------------
 # files
 # ---------------------------------------------------------------------------
 

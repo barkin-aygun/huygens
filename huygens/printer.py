@@ -146,6 +146,39 @@ class PrintStatus:
 
 
 @dataclass
+class PrinterAttributes:
+    video_streams_used: int
+    video_streams_max: int
+    usb_present: bool
+    remaining_memory: int          # bytes free on internal storage
+    release_film_max: int          # FEP service-life limit; current count is in PrintStatus
+    resolution: str                # e.g. "11520x5120"
+    xyz_size: str                  # build volume "211.68x118.37x220" (mm)
+    supported_file_types: list[str]
+    network: str                   # "wlan" | "eth"
+    firmware: str
+    capabilities: list[str]
+    devices_status: dict           # per-component health (1 = OK)
+
+    @staticmethod
+    def from_dict(a: dict) -> "PrinterAttributes":
+        return PrinterAttributes(
+            video_streams_used=a.get("NumberOfVideoStreamConnected", 0),
+            video_streams_max=a.get("MaximumVideoStreamAllowed", 0),
+            usb_present=a.get("UsbDiskStatus", 0) == 1,
+            remaining_memory=a.get("RemainingMemory", 0),
+            release_film_max=a.get("ReleaseFilmMax", 0),
+            resolution=a.get("Resolution", ""),
+            xyz_size=a.get("XYZsize", ""),
+            supported_file_types=a.get("SupportFileType", []),
+            network=a.get("NetworkStatus", ""),
+            firmware=a.get("FirmwareVersion", ""),
+            capabilities=a.get("Capabilities", []),
+            devices_status=a.get("DevicesStatus", {}),
+        )
+
+
+@dataclass
 class FileEntry:
     name: str
     used_size: int
@@ -223,6 +256,35 @@ def start_print(
     ack = resp.get("Data", {}).get("Ack", resp.get("Ack", 0))
     if ack != 0:
         raise ValueError(ACK_ERRORS.get(ack, f"Printer error (Ack={ack})"))
+
+
+def _print_control(ip: str, mainboard_id: str, cmd: int, timeout: float) -> None:
+    """Send a parameterless print-control command (pause/resume/stop)."""
+    resp = _transport.ws_command(ip, mainboard_id, cmd, {}, timeout)
+    ack = resp.get("Data", {}).get("Ack", resp.get("Ack", 0))
+    if ack != 0:
+        raise ValueError(ACK_ERRORS.get(ack, f"Printer error (Ack={ack})"))
+
+
+def pause_print(ip: str, mainboard_id: str, timeout: float = 10.0) -> None:
+    """Pause the running print job."""
+    _print_control(ip, mainboard_id, CMD_PAUSE_PRINT, timeout)
+
+
+def resume_print(ip: str, mainboard_id: str, timeout: float = 10.0) -> None:
+    """Resume a paused print job."""
+    _print_control(ip, mainboard_id, CMD_RESUME_PRINT, timeout)
+
+
+def stop_print(ip: str, mainboard_id: str, timeout: float = 10.0) -> None:
+    """Stop (cancel) the running print job."""
+    _print_control(ip, mainboard_id, CMD_STOP_PRINT, timeout)
+
+
+def get_attributes(ip: str, mainboard_id: str, timeout: float = 10.0) -> PrinterAttributes:
+    """Query the printer's static-ish attributes (Cmd 1)."""
+    raw = _transport.ws_get_attributes(ip, mainboard_id, timeout)
+    return PrinterAttributes.from_dict(raw)
 
 
 UPLOAD_EXTENSIONS = (".goo", ".ctb")

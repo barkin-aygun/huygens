@@ -126,6 +126,28 @@ def ws_get_status(ip: str, mainboard_id: str, timeout: float) -> dict:
     return asyncio.run(_ws_status(ip, mainboard_id, timeout))
 
 
+async def _ws_attributes(ip: str, mainboard_id: str, timeout: float) -> dict:
+    url = f"ws://{ip}:{_WS_PORT}/websocket"
+    payload, _ = _build_msg(1, mainboard_id, {})   # Cmd 1 = attribute request
+    topic = f"sdcp/attributes/{mainboard_id}"
+    async with websockets.connect(url, open_timeout=timeout) as ws:
+        await ws.send(payload)
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for topic {topic!r}")
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            parsed = json.loads(raw)
+            if parsed.get("Topic") != topic:
+                continue
+            return parsed.get("Attributes", {})
+
+
+def ws_get_attributes(ip: str, mainboard_id: str, timeout: float) -> dict:
+    return asyncio.run(_ws_attributes(ip, mainboard_id, timeout))
+
+
 def ws_command(ip: str, mainboard_id: str, cmd: int, data: dict, timeout: float) -> dict:
     return asyncio.run(_ws_command(ip, mainboard_id, cmd, data, timeout))
 
