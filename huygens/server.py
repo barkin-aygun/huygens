@@ -722,7 +722,8 @@ class _Uploader:
                 self._state["sent"] = sent
                 self._state["total"] = total
         try:
-            _printer.upload_file(self._ip, self._mid, local_path, on_progress=on_progress)
+            _printer.upload_file(self._ip, self._mid, local_path,
+                                 on_progress=on_progress, remote_filename=filename)
             with self._lock:
                 self._state["status"] = "done"
         except Exception as e:

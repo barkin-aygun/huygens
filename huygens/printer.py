@@ -234,15 +234,18 @@ def upload_file(
     local_path: str,
     timeout: float = 120.0,
     on_progress=None,
+    remote_filename: str | None = None,
 ) -> None:
     """Upload a sliced .goo or .ctb file to the printer's internal storage.
 
     The file is streamed to the SDCP HTTP endpoint in 1 MB packets with a
     full-file MD5 checksum. `on_progress(sent_bytes, total_bytes)` is called
-    after each packet. Raises ValueError for an unsupported file type and
-    RuntimeError if the printer rejects the upload.
+    after each packet. The printer stores it under `remote_filename` (defaults
+    to the basename of `local_path`), which matters when `local_path` is a
+    temporary file whose name differs from the original. Raises ValueError for
+    an unsupported file type and RuntimeError if the printer rejects the upload.
     """
-    filename = os.path.basename(local_path)
+    filename = remote_filename or os.path.basename(local_path)
     if not filename.lower().endswith(UPLOAD_EXTENSIONS):
         raise ValueError(
             f"Unsupported file type: only {', '.join(UPLOAD_EXTENSIONS)} files can be uploaded"
