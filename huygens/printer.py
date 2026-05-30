@@ -303,3 +303,30 @@ def list_files(
             is_folder=item.get("type", 1) == 0,
         ))
     return entries
+
+
+def delete_files(
+    ip: str,
+    mainboard_id: str,
+    file_paths: list[str],
+    folder_paths: list[str] | None = None,
+    timeout: float = 10.0,
+) -> list[str]:
+    """Delete files (and optionally folders) from the printer's storage.
+
+    Paths must be exactly as returned by `list_files` (the printer is picky
+    about the leading storage prefix). Returns the list of paths the printer
+    reported it could not delete; an empty list means everything succeeded.
+    Raises ValueError if the printer rejects the whole request.
+    """
+    resp = _transport.ws_command(
+        ip, mainboard_id, CMD_DELETE_FILES,
+        {"FileList": file_paths, "FolderList": folder_paths or []},
+        timeout,
+    )
+    data = resp.get("Data", resp)
+    ack = data.get("Ack", resp.get("Ack", 0))
+    failed = data.get("ErrData", resp.get("ErrData", [])) or []
+    if ack != 0 and not failed:
+        raise ValueError(f"Printer rejected delete request (Ack={ack})")
+    return failed

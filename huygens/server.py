@@ -196,6 +196,53 @@ _DASHBOARD = """<!DOCTYPE html>
       color: var(--red); border-radius: 6px; padding: 10px 14px; font-size: 13px;
     }
 
+    /* ── File browser ── */
+    .files-head { display: flex; align-items: center; justify-content: space-between; }
+    .files-tools { display: flex; align-items: center; gap: 4px; }
+    .seg {
+      background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+      border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+      font-weight: 600; text-transform: none; letter-spacing: 0;
+    }
+    .seg:hover { color: var(--text); border-color: var(--blue); }
+    .seg.active { background: rgba(88,166,255,.15); color: var(--blue); border-color: var(--blue); }
+    .icon-btn {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+    }
+    .icon-btn:hover { color: var(--blue); background: var(--bg); }
+    .icon-btn:disabled { opacity: .4; cursor: default; }
+    .files-path { font-family: monospace; font-size: 11px; color: var(--muted); margin-bottom: 8px; word-break: break-all; }
+    .files-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+    .file-row {
+      display: flex; align-items: center; gap: 9px; padding: 7px 8px;
+      border-radius: 6px; cursor: default;
+    }
+    .file-row:hover { background: var(--bg); }
+    .file-row .file-ico { flex-shrink: 0; display: flex; }
+    .file-row.folder { cursor: pointer; }
+    .file-name {
+      flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; font-family: monospace;
+    }
+    .file-tag {
+      font-size: 10px; color: var(--muted); border: 1px solid var(--border);
+      border-radius: 10px; padding: 0 7px; flex-shrink: 0;
+    }
+    .file-del {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 3px; border-radius: 4px; flex-shrink: 0; opacity: 0; display: flex;
+      transition: opacity .12s, color .12s, background .12s;
+    }
+    .file-row:hover .file-del { opacity: 1; }
+    .file-del:hover { color: var(--red); background: rgba(248,81,73,.12); }
+    .file-del:disabled { opacity: .4 !important; cursor: default; }
+    .files-empty { color: var(--muted); font-size: 12px; text-align: center; padding: 18px 0; }
+    .ico-goo { color: var(--blue); }
+    .ico-ctb { color: var(--green); }
+    .ico-other { color: var(--muted); }
+    .ico-folder { color: var(--orange); }
+
     /* ── Footer ── */
     footer {
       padding: 8px 20px; border-top: 1px solid var(--border);
@@ -259,6 +306,19 @@ _DASHBOARD = """<!DOCTYPE html>
     </div>
     <div id="status-cards">
       <div class="card" style="color:var(--muted);text-align:center;padding:32px">Loading…</div>
+    </div>
+
+    <div class="card" id="files-card">
+      <div class="card-title files-head">
+        <span>Files</span>
+        <span class="files-tools">
+          <button class="seg active" id="seg-local" onclick="setStorage('/local/')">Local</button>
+          <button class="seg" id="seg-usb" onclick="setStorage('/usb/')">USB</button>
+          <button class="icon-btn" id="files-refresh" title="Refresh" onclick="loadFiles()">&#x21bb;</button>
+        </span>
+      </div>
+      <div class="files-path" id="files-path"></div>
+      <div class="files-list" id="files-list"><div class="files-empty">Loading…</div></div>
     </div>
   </div>
 </main>
@@ -534,6 +594,7 @@ function pollUpload() {
       document.getElementById('upload-detail').textContent = fmtBytes(s.sent) + ' / ' + fmtBytes(s.total);
     } else if (s.status === 'done') {
       finishUpload('ok', 'Uploaded ' + (s.filename || ''));
+      if (typeof loadFiles === 'function') loadFiles();
     } else if (s.status === 'error') {
       finishUpload('error', s.error || 'Upload failed');
     }
@@ -553,6 +614,106 @@ function finishUpload(kind, msg) {
     if (s.status === 'uploading') { setUploadUI(true, s.filename); pollUpload(); }
   } catch (e) {}
 })();
+
+// ── File browser ──
+let _storage = '/local/';
+let _path = '/local/';
+
+const FILE_ICON = '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24"><path d="M6 2.5h7l5 5v14H6z"/><path d="M13 2.5V8h5"/></svg>';
+const FOLDER_ICON = '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24"><path d="M3 6.5h6l2 2.5h10v11H3z"/></svg>';
+const UP_ICON = '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24"><path d="M5 12l7-7 7 7M12 5v15"/></svg>';
+
+function extClass(name) {
+  const n = name.toLowerCase();
+  if (n.endsWith('.goo')) return 'ico-goo';
+  if (n.endsWith('.ctb')) return 'ico-ctb';
+  return 'ico-other';
+}
+
+function setStorage(s) {
+  _storage = s;
+  _path = s;
+  document.getElementById('seg-local').classList.toggle('active', s === '/local/');
+  document.getElementById('seg-usb').classList.toggle('active', s === '/usb/');
+  loadFiles();
+}
+
+function openFolder(path) { _path = path; loadFiles(); }
+
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadFiles() {
+  const list = document.getElementById('files-list');
+  document.getElementById('files-path').textContent = _path;
+  const btn = document.getElementById('files-refresh');
+  btn.disabled = true;
+  let data;
+  try {
+    const resp = await fetch('/api/files?path=' + encodeURIComponent(_path));
+    data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+  } catch (e) {
+    list.innerHTML = `<div class="files-empty">Couldn't load files — ${esc(String(e.message || e))}</div>`;
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+
+  let html = '';
+  if (_path !== _storage) {
+    let trimmed = _path;
+    while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
+    const up = trimmed.split('/').slice(0, -1).join('/') || _storage;
+    html += `<div class="file-row folder" onclick="openFolder('${esc(up)}')">
+      <span class="file-ico ico-folder">${UP_ICON}</span><span class="file-name">..</span></div>`;
+  }
+
+  const folders = data.entries.filter(e => e.is_folder);
+  const files = data.entries.filter(e => !e.is_folder);
+
+  for (const e of folders) {
+    html += `<div class="file-row folder" onclick="openFolder('${esc(e.path)}')">
+      <span class="file-ico ico-folder">${FOLDER_ICON}</span>
+      <span class="file-name">${esc(e.name)}/</span></div>`;
+  }
+  for (const e of files) {
+    html += `<div class="file-row">
+      <span class="file-ico ${extClass(e.name)}">${FILE_ICON}</span>
+      <span class="file-name" title="${esc(e.name)}">${esc(e.name)}</span>
+      <span class="file-tag">${esc(e.storage)}</span>
+      <button class="file-del" title="Delete" onclick='deleteFile(${JSON.stringify(e.path)}, ${JSON.stringify(e.name)})'>
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+      </button></div>`;
+  }
+
+  if (!folders.length && !files.length && _path === _storage) {
+    html = `<div class="files-empty">No files on ${_storage === '/usb/' ? 'USB' : 'local storage'}</div>`;
+  }
+  list.innerHTML = html;
+}
+
+async function deleteFile(path, name) {
+  if (!confirm('Delete "' + name + '" from the printer? This cannot be undone.')) return;
+  const list = document.getElementById('files-list');
+  list.querySelectorAll('.file-del').forEach(b => b.disabled = true);
+  try {
+    const resp = await fetch('/api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [path] }),
+    });
+    const d = await resp.json();
+    if (!resp.ok || d.error) throw new Error(d.error || ('HTTP ' + resp.status));
+    if (d.failed && d.failed.length) throw new Error('Printer could not delete the file');
+  } catch (e) {
+    alert('Delete failed: ' + (e.message || e));
+  }
+  loadFiles();
+}
+
+loadFiles();
 
 poll();
 setInterval(poll, POLL_MS);
@@ -807,6 +968,38 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     @app.route("/api/upload/status")
     def api_upload_status():
         return jsonify(uploader.status())
+
+    @app.route("/api/files")
+    def api_files():
+        path = request.args.get("path", "/local/")
+        try:
+            entries = _printer.list_files(cfg["ip"], cfg["mainboard_id"], path)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({
+            "path": path,
+            "entries": [{
+                "name": e.name.rstrip("/").rsplit("/", 1)[-1] or e.name,
+                "path": e.name,
+                "is_folder": e.is_folder,
+                "storage": e.storage_label,
+            } for e in entries],
+        })
+
+    @app.route("/api/files/delete", methods=["POST"])
+    def api_files_delete():
+        body = request.get_json(silent=True) or {}
+        files = body.get("paths", [])
+        folders = body.get("folders", [])
+        if not files and not folders:
+            return jsonify({"error": "Nothing to delete"}), 400
+        try:
+            failed = _printer.delete_files(cfg["ip"], cfg["mainboard_id"], files, folders)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"ok": not failed, "failed": failed})
 
     @app.route("/api/status")
     def api_status():

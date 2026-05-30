@@ -226,6 +226,59 @@ def files(path, timeout):
 
 
 # ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("filename")
+@click.option("--path", "-p", default="/local/", show_default=True,
+              help="Storage path the file lives in (/local/ or /usb/).")
+@click.option("--yes", "-y", is_flag=True, help="Delete without confirmation.")
+@click.option("--timeout", "-t", default=10.0, show_default=True,
+              help="Seconds to wait for the printer response.")
+def delete(filename, path, yes, timeout):
+    """Delete FILENAME from the printer's storage.
+
+    FILENAME may be a bare name (resolved against --path) or a full path as
+    shown by `huygens files`.
+    """
+    cfg = config.require()
+    try:
+        entries = printer.list_files(cfg["ip"], cfg["mainboard_id"], path, timeout)
+    except TimeoutError:
+        raise SystemExit("Timed out waiting for printer response.")
+    except OSError as e:
+        raise SystemExit(f"Connection failed: {e}")
+
+    def basename(name):
+        return name.rstrip("/").rsplit("/", 1)[-1]
+
+    match = next(
+        (e for e in entries
+         if e.name == filename or basename(e.name) == filename),
+        None,
+    )
+    if match is None:
+        raise SystemExit(f"No file named {filename!r} at {path}")
+
+    if not yes:
+        click.confirm(f"Delete {match.name} from {cfg['name']}?", abort=True)
+
+    try:
+        failed = printer.delete_files(cfg["ip"], cfg["mainboard_id"], [match.name], timeout=timeout)
+    except TimeoutError:
+        raise SystemExit("Timed out waiting for printer response.")
+    except OSError as e:
+        raise SystemExit(f"Connection failed: {e}")
+    except ValueError as e:
+        raise SystemExit(f"Printer rejected the request: {e}")
+
+    if failed:
+        raise SystemExit(f"Failed to delete: {', '.join(failed)}")
+    click.echo(f"Deleted: {match.name}")
+
+
+# ---------------------------------------------------------------------------
 # serve
 # ---------------------------------------------------------------------------
 
