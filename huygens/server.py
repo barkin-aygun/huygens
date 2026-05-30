@@ -65,10 +65,12 @@ _DASHBOARD = """<!DOCTYPE html>
       background: var(--muted); flex-shrink: 0;
       transition: background 0.4s, box-shadow 0.4s;
     }
-    .dot.printing { background: var(--green);  box-shadow: 0 0 7px var(--green); }
+    .dot.printing { background: var(--green);  box-shadow: 0 0 7px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+    .dot.online   { background: var(--green);  box-shadow: 0 0 7px var(--green); }
     .dot.idle     { background: var(--muted); }
     .dot.offline  { background: var(--orange); }
     .dot.error    { background: var(--red);    box-shadow: 0 0 7px var(--red); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
     .header-right { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 16px; }
 
     /* ── Main layout ── */
@@ -87,7 +89,23 @@ _DASHBOARD = """<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       overflow: hidden;
+      position: relative;
     }
+    .stream-stop {
+      position: absolute; top: 12px; right: 12px; z-index: 2;
+      display: none; align-items: center; gap: 6px;
+      padding: 7px 14px; border-radius: 8px;
+      background: rgba(13,17,23,.7); border: 1px solid var(--border);
+      color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer;
+      backdrop-filter: blur(4px);
+    }
+    .stream-stop:hover { border-color: var(--red); color: var(--red); }
+    .spinner {
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 3px solid var(--border); border-top-color: var(--blue);
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .video-pane video, .video-pane img {
       max-width: 100%;
       max-height: 100%;
@@ -238,6 +256,24 @@ _DASHBOARD = """<!DOCTYPE html>
     .file-del:hover { color: var(--red); background: rgba(248,81,73,.12); }
     .file-del:disabled { opacity: .4 !important; cursor: default; }
     .files-empty { color: var(--muted); font-size: 12px; text-align: center; padding: 18px 0; }
+    .file-print {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 3px; border-radius: 4px; flex-shrink: 0; opacity: 0; display: flex;
+      transition: opacity .12s, color .12s, background .12s;
+    }
+    .file-row:hover .file-print { opacity: 1; }
+    .file-print:hover { color: var(--green); background: rgba(63,185,80,.12); }
+
+    /* ── Print controls ── */
+    .ctrl-row { display: flex; gap: 8px; margin-top: 12px; }
+    .ctrl-btn {
+      flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 8px; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer;
+    }
+    .ctrl-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .ctrl-btn.danger:hover { border-color: var(--red); color: var(--red); background: rgba(248,81,73,.08); }
+    .ctrl-btn:disabled { opacity: .5; cursor: default; }
     .ico-goo { color: var(--blue); }
     .ico-ctb { color: var(--green); }
     .ico-other { color: var(--muted); }
@@ -275,15 +311,22 @@ _DASHBOARD = """<!DOCTYPE html>
   <div class="video-pane">
     <video id="webcam" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;"></video>
     <div class="video-overlay" id="video-overlay">
-      <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
-        <path d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9A2.25 2.25 0 0013.5 5.25h-9A2.25 2.25 0 002.25 9v9A2.25 2.25 0 004.5 18.75z"/>
-      </svg>
-      <button class="stream-btn" id="stream-btn" onclick="toggleStream()">
+      <div id="video-icon">
+        <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
+          <path d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9A2.25 2.25 0 0013.5 5.25h-9A2.25 2.25 0 002.25 9v9A2.25 2.25 0 004.5 18.75z"/>
+        </svg>
+      </div>
+      <div id="video-spinner" class="spinner" style="display:none"></div>
+      <button class="stream-btn" id="stream-btn" onclick="startStream()">
         <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M3 2.5v11l10-5.5L3 2.5z"/></svg>
         Start Stream
       </button>
       <p id="stream-msg" style="font-size:12px;min-height:1em"></p>
     </div>
+    <button class="stream-stop" id="stream-stop" onclick="stopStream()">
+      <svg width="13" height="13" fill="currentColor" viewBox="0 0 16 16"><path d="M3.5 3.5h9v9h-9z"/></svg>
+      Stop
+    </button>
   </div>
 
   <div class="status-pane" id="status-pane">
@@ -306,6 +349,11 @@ _DASHBOARD = """<!DOCTYPE html>
     </div>
     <div id="status-cards">
       <div class="card" style="color:var(--muted);text-align:center;padding:32px">Loading…</div>
+    </div>
+
+    <div class="card" id="device-card" style="display:none">
+      <div class="card-title">Device</div>
+      <div id="device-body"></div>
     </div>
 
     <div class="card" id="files-card">
@@ -351,7 +399,7 @@ function fmtMs(ms) {
 function render(d) {
   // Header dot
   const dot = document.getElementById('hdr-dot');
-  dot.className = 'dot ' + (d.offline ? 'offline' : d.error_number ? 'error' : d.machine_status === 1 ? 'printing' : 'idle');
+  dot.className = 'dot ' + (d.offline ? 'offline' : d.error_number ? 'error' : d.machine_status === 1 ? 'printing' : 'online');
   const updated = document.getElementById('hdr-updated');
   updated.textContent = d.offline
     ? 'Offline — last seen ' + new Date().toLocaleTimeString()
@@ -378,6 +426,20 @@ function render(d) {
   // Job card
   if (d.filename) {
     const pct = d.progress_pct !== null ? d.progress_pct.toFixed(1) : null;
+    const isPaused = d.print_status === 6;                       // Paused
+    const isActive = d.machine_status === 1 || [1,2,3,4,5].includes(d.print_status) || isPaused;
+    const PAUSE = '<svg width="13" height="13" fill="currentColor" viewBox="0 0 16 16"><path d="M5 3.5h2v9H5zm4 0h2v9H9z"/></svg>';
+    const PLAY  = '<svg width="13" height="13" fill="currentColor" viewBox="0 0 16 16"><path d="M3 2.5v11l10-5.5z"/></svg>';
+    const STOP  = '<svg width="13" height="13" fill="currentColor" viewBox="0 0 16 16"><path d="M3.5 3.5h9v9h-9z"/></svg>';
+    let controls = '';
+    if (isActive) {
+      controls = `<div class="ctrl-row">
+        ${isPaused
+          ? `<button class="ctrl-btn" onclick="printResume()">${PLAY} Resume</button>`
+          : `<button class="ctrl-btn" onclick="printPause()">${PAUSE} Pause</button>`}
+        <button class="ctrl-btn danger" onclick="printStop()">${STOP} Stop</button>
+      </div>`;
+    }
     html += `<div class="card">
       <div class="card-title">Print Job</div>
       <div class="filename">${d.filename}</div>
@@ -389,6 +451,7 @@ function render(d) {
         <span>Layer ${d.current_layer.toLocaleString()} / ${d.total_layers.toLocaleString()}</span>
         <span>${pct}%</span>
       </div>` : ''}
+      ${controls}
     </div>`;
   }
 
@@ -422,11 +485,15 @@ function render(d) {
   }
 
   // Details card
+  const fepMax = _attrs && _attrs.release_film_max;
+  const fep = fepMax
+    ? `${d.release_film_count.toLocaleString()} / ${fepMax.toLocaleString()} <span style="color:var(--muted)">(${(d.release_film_count / fepMax * 100).toFixed(0)}%)</span>`
+    : d.release_film_count.toLocaleString();
   html += `<div class="card">
     <div class="card-title">Details</div>
     <div class="row">
       <span class="row-label">FEP cycles</span>
-      <span class="row-value">${d.release_film_count.toLocaleString()}</span>
+      <span class="row-value">${fep}</span>
     </div>
     <div class="row">
       <span class="row-label">Timelapse</span>
@@ -460,70 +527,102 @@ async function poll() {
   }
 }
 
-// ── Video stream toggle ──
+// ── Video stream ──
 let _hls = null;
 let _streaming = false;
 
-function _setStreamUI(active, msg) {
-  const btn = document.getElementById('stream-btn');
+// state: 'idle' | 'buffering' | 'playing'
+function _setStreamUI(state, msg) {
   const overlay = document.getElementById('video-overlay');
-  const video = document.getElementById('webcam');
-  const msgEl = document.getElementById('stream-msg');
-  if (active) {
-    btn.innerHTML = '<svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5 3.5h2v9H5zm4 0h2v9H9z"/></svg> Stop Stream';
-    btn.classList.add('active');
-    overlay.style.display = 'none';
-    video.style.display = 'block';
-  } else {
-    btn.innerHTML = '<svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M3 2.5v11l10-5.5L3 2.5z"/></svg> Start Stream';
-    btn.classList.remove('active');
-    overlay.style.display = 'flex';
-    video.style.display = 'none';
-  }
+  const video   = document.getElementById('webcam');
+  const stopBtn = document.getElementById('stream-stop');
+  const startBtn= document.getElementById('stream-btn');
+  const icon    = document.getElementById('video-icon');
+  const spinner = document.getElementById('video-spinner');
+  const msgEl   = document.getElementById('stream-msg');
+
+  const playing = state === 'playing';
+  overlay.style.display = playing ? 'none' : 'flex';
+  video.style.display   = playing ? 'block' : 'none';
+  stopBtn.style.display = (state === 'idle') ? 'none' : 'inline-flex';
+
+  const buffering = state === 'buffering';
+  startBtn.style.display = buffering ? 'none' : 'inline-flex';
+  icon.style.display     = buffering ? 'none' : 'block';
+  spinner.style.display  = buffering ? 'block' : 'none';
+
   if (msgEl) msgEl.textContent = msg || '';
 }
 
-function _startHLS() {
+async function _waitForStream(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!_streaming) return false;            // user pressed Stop while waiting
+    try {
+      // Poll the readiness flag (always 200) rather than the playlist, which
+      // 503s until ready and would spam the console with failed requests.
+      const d = await (await fetch('/api/video/ready', { cache: 'no-store' })).json();
+      if (d.ready) return true;
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 700));
+  }
+  return false;
+}
+
+async function startStream() {
+  if (_streaming) return;
+  _streaming = true;
+  _setStreamUI('buffering', 'Starting camera…');
+
+  let data;
+  try {
+    data = await (await fetch('/api/video/start', { method: 'POST' })).json();
+  } catch (e) { data = { error: 'Could not reach dashboard' }; }
+  if (!_streaming) return;                     // stopped during the request
+  if (data.error) { _streaming = false; _setStreamUI('idle', data.error); return; }
+
+  _setStreamUI('buffering', 'Buffering…');
+  const ready = await _waitForStream(25000);
+  if (!_streaming) return;
+  if (!ready) { await stopStream(); _setStreamUI('idle', 'Stream did not start'); return; }
+
   const video = document.getElementById('webcam');
   const src = '/stream/stream.m3u8';
-  if (Hls.isSupported()) {
-    _hls = new Hls({ lowLatencyMode: true });
+  if (window.Hls && Hls.isSupported()) {
+    _hls = new Hls({
+      lowLatencyMode: true,
+      liveSyncDurationCount: 2,        // sit ~2 segments behind live, not the default 3
+      liveMaxLatencyDurationCount: 5,
+      maxLiveSyncPlaybackRate: 1.5,    // speed up gently to chase the live edge
+      manifestLoadingMaxRetry: 8,
+      manifestLoadingRetryDelay: 800,
+    });
     _hls.loadSource(src);
     _hls.attachMedia(video);
+    _hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      _setStreamUI('playing');
+      video.play().catch(() => {});
+    });
+    _hls.on(Hls.Events.ERROR, (evt, d) => {
+      if (!d.fatal) return;
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) _hls.startLoad();
+      else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) _hls.recoverMediaError();
+    });
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = src;
+    video.src = src;                           // Safari native HLS
+    video.addEventListener('loadeddata', () => _setStreamUI('playing'), { once: true });
+    video.play().catch(() => {});
   }
 }
 
-function _stopHLS() {
+async function stopStream() {
+  _streaming = false;
   if (_hls) { _hls.destroy(); _hls = null; }
   const video = document.getElementById('webcam');
-  video.src = '';
-}
-
-async function toggleStream() {
-  const btn = document.getElementById('stream-btn');
-  btn.disabled = true;
-
-  if (_streaming) {
-    _stopHLS();
-    _streaming = false;
-    _setStreamUI(false, '');
-    await fetch('/api/video/stop', { method: 'POST' });
-  } else {
-    document.getElementById('stream-msg').textContent = 'Starting…';
-    const resp = await fetch('/api/video/start', { method: 'POST' });
-    const data = await resp.json();
-    if (data.error) {
-      document.getElementById('stream-msg').textContent = data.error;
-    } else {
-      _streaming = true;
-      _setStreamUI(true);
-      _startHLS();
-    }
-  }
-
-  btn.disabled = false;
+  video.removeAttribute('src');
+  video.load();
+  _setStreamUI('idle', '');
+  try { await fetch('/api/video/stop', { method: 'POST' }); } catch (e) {}
 }
 
 // ── File upload ──
@@ -683,6 +782,9 @@ async function loadFiles() {
       <span class="file-ico ${extClass(e.name)}">${FILE_ICON}</span>
       <span class="file-name" title="${esc(e.name)}">${esc(e.name)}</span>
       <span class="file-tag">${esc(e.storage)}</span>
+      <button class="file-print" title="Print" onclick='startPrint(${JSON.stringify(e.path)}, ${JSON.stringify(e.name)})'>
+        <svg width="15" height="15" fill="currentColor" viewBox="0 0 16 16"><path d="M3 2.5v11l10-5.5z"/></svg>
+      </button>
       <button class="file-del" title="Delete" onclick='deleteFile(${JSON.stringify(e.path)}, ${JSON.stringify(e.name)})'>
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
       </button></div>`;
@@ -713,7 +815,97 @@ async function deleteFile(path, name) {
   loadFiles();
 }
 
+// ── Print control ──
+async function _printAction(path, label) {
+  try {
+    const r = await fetch(path, { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+  } catch (e) { alert(label + ' failed: ' + (e.message || e)); }
+  poll();
+}
+function printPause()  { _printAction('/api/print/pause', 'Pause'); }
+function printResume() { _printAction('/api/print/resume', 'Resume'); }
+function printStop() {
+  if (!confirm('Stop the current print? This cannot be undone.')) return;
+  _printAction('/api/print/stop', 'Stop');
+}
+
+async function startPrint(path, name) {
+  if (!confirm('Start printing "' + name + '" on the printer?')) return;
+  try {
+    const r = await fetch('/api/print/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: path }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+  } catch (e) { alert('Could not start print: ' + (e.message || e)); return; }
+  poll();
+}
+
+// ── Device attributes ──
+let _attrs = null;
+
+function fmtGB(bytes) {
+  if (!bytes) return '—';
+  const gb = bytes / 1e9;
+  return (gb >= 1 ? gb.toFixed(1) + ' GB' : (bytes/1e6).toFixed(0) + ' MB');
+}
+
+function devRow(label, value) {
+  return `<div class="row"><span class="row-label">${label}</span><span class="row-value">${value}</span></div>`;
+}
+
+function renderDevice() {
+  const a = _attrs;
+  const card = document.getElementById('device-card');
+  if (!a || !a.firmware && !a.resolution) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  const slotsBusy = a.video_streams_used > 0;
+  const slots = `<span class="${slotsBusy ? '' : ''}" style="color:${slotsBusy ? 'var(--blue)' : 'var(--text)'}">${a.video_streams_used} / ${a.video_streams_max}</span>`;
+  const build = a.xyz_size ? a.xyz_size.replace(/x/g, ' × ') + ' mm' : '—';
+  const res = a.resolution ? a.resolution.replace(/x/g, ' × ') : '—';
+
+  // component health
+  const ds = a.devices_status || {};
+  const vals = Object.values(ds);
+  const bad = vals.filter(v => v !== 1).length;
+  const health = !vals.length ? '—'
+    : bad === 0 ? badge('All OK', 'g')
+    : badge(bad + ' fault' + (bad > 1 ? 's' : ''), 'r');
+
+  let html = '';
+  html += devRow('Video streams', slots);
+  html += devRow('Storage free', fmtGB(a.remaining_memory));
+  html += devRow('USB', a.usb_present ? badge('Inserted', 'b') : badge('None', 'm'));
+  html += devRow('Build volume', build);
+  html += devRow('Resolution', res + ' px');
+  html += devRow('Network', a.network ? a.network.toUpperCase() : '—');
+  html += devRow('Components', health);
+  document.getElementById('device-body').innerHTML = html;
+
+  // Disable the USB tab in the file browser when no stick is present
+  const usbSeg = document.getElementById('seg-usb');
+  if (usbSeg) {
+    usbSeg.disabled = !a.usb_present;
+    usbSeg.style.opacity = a.usb_present ? '' : '.4';
+    usbSeg.title = a.usb_present ? '' : 'No USB drive inserted';
+  }
+}
+
+async function pollAttributes() {
+  try {
+    _attrs = await (await fetch('/api/attributes')).json();
+    renderDevice();
+  } catch (e) {}
+}
+
 loadFiles();
+pollAttributes();
+setInterval(pollAttributes, 8000);
 
 poll();
 setInterval(poll, POLL_MS);
@@ -816,7 +1008,7 @@ class _HLSTranscoder:
             "-c", "copy",
             "-f", "hls",
             "-hls_time", "2",
-            "-hls_list_size", "5",
+            "-hls_list_size", "3",   # smaller live window => less room to lag behind
             "-hls_flags", "delete_segments+append_list+omit_endlist",
             "-hls_segment_filename", os.path.join(self._dir, "seg%05d.ts"),
             self._playlist,
@@ -864,6 +1056,34 @@ class _StatusPoller:
     def get(self):
         with self._lock:
             return self._data, self._offline
+
+
+class _AttributesPoller:
+    """Poll the printer's attributes (Cmd 1) on a slow cadence — they change
+    rarely (USB inserted, video slots, free space), so 8s is plenty."""
+
+    def __init__(self, ip: str, mainboard_id: str, interval: float = 8.0):
+        self._ip = ip
+        self._mid = mainboard_id
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._data = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            try:
+                a = _printer.get_attributes(self._ip, self._mid)
+                with self._lock:
+                    self._data = a
+            except Exception:
+                pass
+            time.sleep(self._interval)
+
+    def get(self):
+        with self._lock:
+            return self._data
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1150,7 @@ class _Uploader:
 def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     app = Flask(__name__)
     poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"])
+    attrs_poller = _AttributesPoller(cfg["ip"], cfg["mainboard_id"])
     uploader = _Uploader(cfg["ip"], cfg["mainboard_id"])
     _hls = [None]  # mutable box so inner functions can reassign
 
@@ -963,6 +1184,12 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
         _printer.stop_video_stream(cfg["ip"], cfg["mainboard_id"])
         return jsonify({"ok": True})
 
+    @app.route("/api/video/ready")
+    def video_ready():
+        # Always 200 so the client can poll during startup without the browser
+        # logging a 503 for every probe of the not-yet-ready HLS playlist.
+        return jsonify({"ready": bool(_hls[0] and _hls[0].ready)})
+
     @app.route("/stream/<path:filename>")
     def stream_file(filename):
         if not _hls[0]:
@@ -991,6 +1218,62 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     @app.route("/api/upload/status")
     def api_upload_status():
         return jsonify(uploader.status())
+
+    @app.route("/api/attributes")
+    def api_attributes():
+        a = attrs_poller.get()
+        if a is None:
+            return jsonify({})
+        return jsonify({
+            "video_streams_used": a.video_streams_used,
+            "video_streams_max":  a.video_streams_max,
+            "usb_present":        a.usb_present,
+            "remaining_memory":   a.remaining_memory,
+            "release_film_max":   a.release_film_max,
+            "resolution":         a.resolution,
+            "xyz_size":           a.xyz_size,
+            "supported_file_types": a.supported_file_types,
+            "network":            a.network,
+            "firmware":           a.firmware,
+            "capabilities":       a.capabilities,
+            "devices_status":     a.devices_status,
+        })
+
+    @app.route("/api/print/start", methods=["POST"])
+    def api_print_start():
+        body = request.get_json(silent=True) or {}
+        filename = (body.get("filename") or "").strip()
+        if not filename:
+            return jsonify({"error": "No filename provided"}), 400
+        try:
+            _printer.start_print(cfg["ip"], cfg["mainboard_id"], filename,
+                                 int(body.get("start_layer", 0)))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"ok": True})
+
+    def _print_action(fn):
+        try:
+            fn(cfg["ip"], cfg["mainboard_id"])
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"ok": True})
+
+    @app.route("/api/print/pause", methods=["POST"])
+    def api_print_pause():
+        return _print_action(_printer.pause_print)
+
+    @app.route("/api/print/resume", methods=["POST"])
+    def api_print_resume():
+        return _print_action(_printer.resume_print)
+
+    @app.route("/api/print/stop", methods=["POST"])
+    def api_print_stop():
+        return _print_action(_printer.stop_print)
 
     @app.route("/api/files")
     def api_files():
