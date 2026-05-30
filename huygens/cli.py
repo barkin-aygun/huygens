@@ -123,7 +123,8 @@ def print_status(timeout):
     """Show the current print job status."""
     cfg = config.require()
     try:
-        s = printer.get_status(cfg["ip"], cfg["mainboard_id"], timeout=timeout)
+        s = printer.get_status(cfg["ip"], cfg["mainboard_id"], timeout=timeout,
+                               brand_id=cfg.get("id", ""))
     except TimeoutError:
         raise SystemExit("Timed out waiting for printer response.")
     except OSError as e:
@@ -175,7 +176,8 @@ def print_start(filename, start_layer, timeout):
     cfg = config.require()
     try:
         printer.start_print(
-            cfg["ip"], cfg["mainboard_id"], filename, start_layer, timeout
+            cfg["ip"], cfg["mainboard_id"], filename, start_layer, timeout,
+            cfg.get("id", "")
         )
     except TimeoutError:
         raise SystemExit("Timed out waiting for printer response.")
@@ -201,7 +203,7 @@ def _print_control_cmd(action: str, past: str, fn, confirm: bool):
         if confirm and not yes:
             click.confirm(f"{action.capitalize()} the current print on {cfg['name']}?", abort=True)
         try:
-            fn(cfg["ip"], cfg["mainboard_id"], timeout)
+            fn(cfg["ip"], cfg["mainboard_id"], timeout, cfg.get("id", ""))
         except TimeoutError:
             raise SystemExit("Timed out waiting for printer response.")
         except OSError as e:
@@ -231,7 +233,8 @@ def files(path, timeout):
     """List printable files on the printer's storage."""
     cfg = config.require()
     try:
-        entries = printer.list_files(cfg["ip"], cfg["mainboard_id"], path, timeout)
+        entries = printer.list_files(cfg["ip"], cfg["mainboard_id"], path, timeout,
+                                     cfg.get("id", ""))
     except TimeoutError:
         raise SystemExit("Timed out waiting for printer response.")
     except OSError as e:
@@ -275,7 +278,8 @@ def delete(filename, path, yes, timeout):
     """
     cfg = config.require()
     try:
-        entries = printer.list_files(cfg["ip"], cfg["mainboard_id"], path, timeout)
+        entries = printer.list_files(cfg["ip"], cfg["mainboard_id"], path, timeout,
+                                     cfg.get("id", ""))
     except TimeoutError:
         raise SystemExit("Timed out waiting for printer response.")
     except OSError as e:
@@ -296,7 +300,8 @@ def delete(filename, path, yes, timeout):
         click.confirm(f"Delete {match.name} from {cfg['name']}?", abort=True)
 
     try:
-        failed = printer.delete_files(cfg["ip"], cfg["mainboard_id"], [match.name], timeout=timeout)
+        failed = printer.delete_files(cfg["ip"], cfg["mainboard_id"], [match.name],
+                                      timeout=timeout, brand_id=cfg.get("id", ""))
     except TimeoutError:
         raise SystemExit("Timed out waiting for printer response.")
     except OSError as e:
@@ -375,7 +380,8 @@ def upload(file, timeout):
             last[0] = sent
 
         try:
-            printer.upload_file(cfg["ip"], cfg["mainboard_id"], file, timeout, on_progress)
+            printer.upload_file(cfg["ip"], cfg["mainboard_id"], file, timeout, on_progress,
+                                brand_id=cfg.get("id", ""))
         except TimeoutError:
             raise SystemExit("Upload timed out.")
         except OSError as e:

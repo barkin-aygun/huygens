@@ -106,7 +106,7 @@ _DASHBOARD = """<!DOCTYPE html>
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .video-pane video, .video-pane img {
+    .video-pane video {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
@@ -128,8 +128,6 @@ _DASHBOARD = """<!DOCTYPE html>
     .stream-btn:hover  { background: #21262d; border-color: var(--blue); color: var(--blue); }
     .stream-btn:active { background: #161b22; }
     .stream-btn:disabled { opacity: .45; cursor: not-allowed; }
-    .stream-btn.active { border-color: var(--red); color: var(--red); }
-    .stream-btn.active:hover { background: rgba(248,81,73,.08); }
 
     /* ── Status pane ── */
     .status-pane {
@@ -238,6 +236,9 @@ _DASHBOARD = """<!DOCTYPE html>
     }
     .file-row:hover { background: var(--bg); }
     .file-row .file-ico { flex-shrink: 0; display: flex; }
+    .file-row .chev, .file-row .chev-spacer { width: 11px; flex-shrink: 0; display: flex; align-items: center; color: var(--muted); }
+    .file-row .chev { transition: transform .12s; }
+    .file-row.folder.open .chev { transform: rotate(90deg); }
     .file-row.folder { cursor: pointer; }
     .file-name {
       flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis;
@@ -351,11 +352,6 @@ _DASHBOARD = """<!DOCTYPE html>
       <div class="card" style="color:var(--muted);text-align:center;padding:32px">Loading…</div>
     </div>
 
-    <div class="card" id="device-card" style="display:none">
-      <div class="card-title">Device</div>
-      <div id="device-body"></div>
-    </div>
-
     <div class="card" id="files-card">
       <div class="card-title files-head">
         <span>Files</span>
@@ -397,6 +393,7 @@ function fmtMs(ms) {
 }
 
 function render(d) {
+  _status = d;
   // Header dot
   const dot = document.getElementById('hdr-dot');
   dot.className = 'dot ' + (d.offline ? 'offline' : d.error_number ? 'error' : d.machine_status === 1 ? 'printing' : 'online');
@@ -409,9 +406,9 @@ function render(d) {
 
   let html = '';
 
-  // Status card
-  html += `<div class="card" ${d.offline ? 'style="opacity:.6"' : ''}>
-    <div class="card-title">Status${d.offline ? ' &nbsp;<span style="color:var(--orange);font-weight:400;text-transform:none;letter-spacing:0">· offline</span>' : ''}</div>
+  // ── Combined Status card: status + temperature + material + device ──
+  const a = _attrs;
+  let body = `
     <div class="row">
       <span class="row-label">Machine</span>
       <span class="row-value">${badge(d.machine_status_label, MACHINE_CLS[d.machine_status] || 'm')}</span>
@@ -420,7 +417,58 @@ function render(d) {
       <span class="row-label">Print</span>
       <span class="row-value">${badge(d.print_status_label, PRINT_CLS[d.print_status] || 'm')}</span>
     </div>
-    ${d.error_number ? `<div class="error-banner" style="margin-top:10px">&#9888; ${d.error_label}</div>` : ''}
+    ${d.error_number ? `<div class="error-banner" style="margin-top:10px">&#9888; ${d.error_label}</div>` : ''}`;
+
+  // Temperature
+  if (d.uv_led_temp !== null || d.box_temp !== null) {
+    body += `<div class="temp-row" style="margin-top:12px">`;
+    if (d.uv_led_temp !== null)
+      body += `<div class="temp-block"><div class="temp-value">${d.uv_led_temp.toFixed(1)}°</div><div class="temp-label">UV LED</div></div>`;
+    if (d.box_temp !== null)
+      body += `<div class="temp-block"><div class="temp-value">${d.box_temp.toFixed(1)}°</div><div class="temp-label">Box</div></div>`;
+    body += `</div>`;
+  }
+
+  // Material — FEP cycles / Timelapse
+  const fepMax = a && a.release_film_max;
+  const fep = fepMax
+    ? `${d.release_film_count.toLocaleString()} / ${fepMax.toLocaleString()} <span style="color:var(--muted)">(${(d.release_film_count / fepMax * 100).toFixed(0)}%)</span>`
+    : d.release_film_count.toLocaleString();
+  body += devRow('FEP cycles', fep);
+  body += devRow('Timelapse', d.timelapse_label);
+
+  // Device attributes
+  if (a && (a.firmware || a.resolution)) {
+    const slotsBusy = a.video_streams_used > 0;
+    const slots = `<span style="color:${slotsBusy ? 'var(--blue)' : 'var(--text)'}">${a.video_streams_used} / ${a.video_streams_max}</span>`;
+    const build = a.xyz_size ? a.xyz_size.replace(/x/g, ' × ') + ' mm' : '—';
+    const res = a.resolution ? a.resolution.replace(/x/g, ' × ') : '—';
+    const ds = a.devices_status || {};
+    const vals = Object.values(ds);
+    const bad = vals.filter(v => v !== 1).length;
+    const health = !vals.length ? '—'
+      : bad === 0 ? badge('All OK', 'g')
+      : badge(bad + ' fault' + (bad > 1 ? 's' : ''), 'r');
+    body += devRow('Video streams', slots);
+    body += devRow('Storage free', fmtGB(a.remaining_memory));
+    body += devRow('USB', a.usb_present ? badge('Inserted', 'b') : badge('None', 'm'));
+    body += devRow('Build volume', build);
+    body += devRow('Resolution', res + ' px');
+    body += devRow('Network', a.network ? a.network.toUpperCase() : '—');
+    body += devRow('Components', health);
+  }
+
+  // Task ID (when a job is running)
+  if (d.task_id) {
+    body += `<div class="row">
+      <span class="row-label">Task ID</span>
+      <span class="row-value" style="font-family:monospace;font-size:11px;color:var(--muted)">${d.task_id}</span>
+    </div>`;
+  }
+
+  html += `<div class="card" ${d.offline ? 'style="opacity:.6"' : ''}>
+    <div class="card-title">Status${d.offline ? ' &nbsp;<span style="color:var(--orange);font-weight:400;text-transform:none;letter-spacing:0">· offline</span>' : ''}</div>
+    ${body}
   </div>`;
 
   // Job card
@@ -472,40 +520,8 @@ function render(d) {
     </div>`;
   }
 
-  // Temperature card
-  if (d.uv_led_temp !== null || d.box_temp !== null) {
-    html += `<div class="card">
-      <div class="card-title">Temperature</div>
-      <div class="temp-row">`;
-    if (d.uv_led_temp !== null)
-      html += `<div class="temp-block"><div class="temp-value">${d.uv_led_temp.toFixed(1)}°</div><div class="temp-label">UV LED</div></div>`;
-    if (d.box_temp !== null)
-      html += `<div class="temp-block"><div class="temp-value">${d.box_temp.toFixed(1)}°</div><div class="temp-label">Box</div></div>`;
-    html += `</div></div>`;
-  }
-
-  // Details card
-  const fepMax = _attrs && _attrs.release_film_max;
-  const fep = fepMax
-    ? `${d.release_film_count.toLocaleString()} / ${fepMax.toLocaleString()} <span style="color:var(--muted)">(${(d.release_film_count / fepMax * 100).toFixed(0)}%)</span>`
-    : d.release_film_count.toLocaleString();
-  html += `<div class="card">
-    <div class="card-title">Details</div>
-    <div class="row">
-      <span class="row-label">FEP cycles</span>
-      <span class="row-value">${fep}</span>
-    </div>
-    <div class="row">
-      <span class="row-label">Timelapse</span>
-      <span class="row-value">${d.timelapse_label}</span>
-    </div>
-    ${d.task_id ? `<div class="row">
-      <span class="row-label">Task ID</span>
-      <span class="row-value" style="font-family:monospace;font-size:11px;color:var(--muted)">${d.task_id}</span>
-    </div>` : ''}
-  </div>`;
-
   document.getElementById('status-cards').innerHTML = html;
+  updateUsbTab();
 }
 
 async function poll() {
@@ -714,13 +730,14 @@ function finishUpload(kind, msg) {
   } catch (e) {}
 })();
 
-// ── File browser ──
+// ── File browser (inline collapse / expand tree) ──
 let _storage = '/local/';
-let _path = '/local/';
+const _expanded = new Set();    // folder paths the user has expanded
+const _dirCache = new Map();    // path -> entries[]  (or { error } on failure)
 
 const FILE_ICON = '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24"><path d="M6 2.5h7l5 5v14H6z"/><path d="M13 2.5V8h5"/></svg>';
 const FOLDER_ICON = '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24"><path d="M3 6.5h6l2 2.5h10v11H3z"/></svg>';
-const UP_ICON = '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24"><path d="M5 12l7-7 7 7M12 5v15"/></svg>';
+const CHEVRON = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M6 4l5 4-5 4z"/></svg>';
 
 function extClass(name) {
   const n = name.toLowerCase();
@@ -729,56 +746,72 @@ function extClass(name) {
   return 'ico-other';
 }
 
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function setStorage(s) {
   _storage = s;
-  _path = s;
+  _expanded.clear();
+  _dirCache.clear();
   document.getElementById('seg-local').classList.toggle('active', s === '/local/');
   document.getElementById('seg-usb').classList.toggle('active', s === '/usb/');
   loadFiles();
 }
 
-function openFolder(path) { _path = path; loadFiles(); }
-
-function esc(s) {
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function fetchDir(path) {
+  try {
+    const resp = await fetch('/api/files?path=' + encodeURIComponent(path));
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    _dirCache.set(path, data.entries);
+  } catch (e) {
+    _dirCache.set(path, { error: String(e.message || e) });
+  }
 }
 
-async function loadFiles() {
-  const list = document.getElementById('files-list');
-  document.getElementById('files-path').textContent = _path;
-  const btn = document.getElementById('files-refresh');
-  btn.disabled = true;
-  let data;
-  try {
-    const resp = await fetch('/api/files?path=' + encodeURIComponent(_path));
-    data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
-  } catch (e) {
-    list.innerHTML = `<div class="files-empty">Couldn't load files — ${esc(String(e.message || e))}</div>`;
-    btn.disabled = false;
-    return;
+async function toggleFolder(path) {
+  if (_expanded.has(path)) {
+    _expanded.delete(path);
+  } else {
+    _expanded.add(path);
+    if (!_dirCache.has(path)) {
+      renderTree();              // paint the chevron + "Loading…" immediately
+      await fetchDir(path);
+    }
   }
-  btn.disabled = false;
+  renderTree();
+}
 
+function indent(depth) { return `padding-left:${8 + depth * 16}px`; }
+
+function renderEntries(entries, depth) {
+  const folders = entries.filter(e => e.is_folder);
+  const files = entries.filter(e => !e.is_folder);
   let html = '';
-  if (_path !== _storage) {
-    let trimmed = _path;
-    while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
-    const up = trimmed.split('/').slice(0, -1).join('/') || _storage;
-    html += `<div class="file-row folder" onclick="openFolder('${esc(up)}')">
-      <span class="file-ico ico-folder">${UP_ICON}</span><span class="file-name">..</span></div>`;
-  }
-
-  const folders = data.entries.filter(e => e.is_folder);
-  const files = data.entries.filter(e => !e.is_folder);
 
   for (const e of folders) {
-    html += `<div class="file-row folder" onclick="openFolder('${esc(e.path)}')">
+    const open = _expanded.has(e.path);
+    html += `<div class="file-row folder${open ? ' open' : ''}" style="${indent(depth)}"
+        onclick='toggleFolder(${JSON.stringify(e.path)})'>
+      <span class="chev">${CHEVRON}</span>
       <span class="file-ico ico-folder">${FOLDER_ICON}</span>
       <span class="file-name">${esc(e.name)}/</span></div>`;
+    if (open) {
+      const sub = _dirCache.get(e.path);
+      if (!sub) {
+        html += `<div class="files-empty" style="${indent(depth + 1)};text-align:left">Loading…</div>`;
+      } else if (sub.error) {
+        html += `<div class="files-empty" style="${indent(depth + 1)};text-align:left">${esc(sub.error)}</div>`;
+      } else {
+        html += renderEntries(sub, depth + 1);
+      }
+    }
   }
+
   for (const e of files) {
-    html += `<div class="file-row">
+    html += `<div class="file-row" style="${indent(depth)}">
+      <span class="chev-spacer"></span>
       <span class="file-ico ${extClass(e.name)}">${FILE_ICON}</span>
       <span class="file-name" title="${esc(e.name)}">${esc(e.name)}</span>
       <span class="file-tag">${esc(e.storage)}</span>
@@ -790,10 +823,32 @@ async function loadFiles() {
       </button></div>`;
   }
 
-  if (!folders.length && !files.length && _path === _storage) {
-    html = `<div class="files-empty">No files on ${_storage === '/usb/' ? 'USB' : 'local storage'}</div>`;
+  return html;
+}
+
+function renderTree() {
+  const list = document.getElementById('files-list');
+  document.getElementById('files-path').textContent = _storage;
+  const root = _dirCache.get(_storage);
+  if (!root) { list.innerHTML = '<div class="files-empty">Loading…</div>'; return; }
+  if (root.error) {
+    list.innerHTML = `<div class="files-empty">Couldn't load files — ${esc(root.error)}</div>`;
+    return;
   }
-  list.innerHTML = html;
+  const html = renderEntries(root, 0);
+  list.innerHTML = html || `<div class="files-empty">No files on ${_storage === '/usb/' ? 'USB' : 'local storage'}</div>`;
+}
+
+async function loadFiles() {
+  const btn = document.getElementById('files-refresh');
+  btn.disabled = true;
+  // Refresh from scratch, but re-fetch every still-open folder too so the tree
+  // stays expanded across reloads (e.g. after an upload completes).
+  _dirCache.clear();
+  await fetchDir(_storage);
+  for (const p of _expanded) await fetchDir(p);
+  btn.disabled = false;
+  renderTree();
 }
 
 async function deleteFile(path, name) {
@@ -847,6 +902,7 @@ async function startPrint(path, name) {
 
 // ── Device attributes ──
 let _attrs = null;
+let _status = null;
 
 function fmtGB(bytes) {
   if (!bytes) return '—';
@@ -858,48 +914,21 @@ function devRow(label, value) {
   return `<div class="row"><span class="row-label">${label}</span><span class="row-value">${value}</span></div>`;
 }
 
-function renderDevice() {
+// Disable the USB tab in the file browser when no stick is present
+function updateUsbTab() {
   const a = _attrs;
-  const card = document.getElementById('device-card');
-  if (!a || !a.firmware && !a.resolution) { card.style.display = 'none'; return; }
-  card.style.display = 'block';
-
-  const slotsBusy = a.video_streams_used > 0;
-  const slots = `<span class="${slotsBusy ? '' : ''}" style="color:${slotsBusy ? 'var(--blue)' : 'var(--text)'}">${a.video_streams_used} / ${a.video_streams_max}</span>`;
-  const build = a.xyz_size ? a.xyz_size.replace(/x/g, ' × ') + ' mm' : '—';
-  const res = a.resolution ? a.resolution.replace(/x/g, ' × ') : '—';
-
-  // component health
-  const ds = a.devices_status || {};
-  const vals = Object.values(ds);
-  const bad = vals.filter(v => v !== 1).length;
-  const health = !vals.length ? '—'
-    : bad === 0 ? badge('All OK', 'g')
-    : badge(bad + ' fault' + (bad > 1 ? 's' : ''), 'r');
-
-  let html = '';
-  html += devRow('Video streams', slots);
-  html += devRow('Storage free', fmtGB(a.remaining_memory));
-  html += devRow('USB', a.usb_present ? badge('Inserted', 'b') : badge('None', 'm'));
-  html += devRow('Build volume', build);
-  html += devRow('Resolution', res + ' px');
-  html += devRow('Network', a.network ? a.network.toUpperCase() : '—');
-  html += devRow('Components', health);
-  document.getElementById('device-body').innerHTML = html;
-
-  // Disable the USB tab in the file browser when no stick is present
   const usbSeg = document.getElementById('seg-usb');
-  if (usbSeg) {
-    usbSeg.disabled = !a.usb_present;
-    usbSeg.style.opacity = a.usb_present ? '' : '.4';
-    usbSeg.title = a.usb_present ? '' : 'No USB drive inserted';
-  }
+  if (!a || !usbSeg) return;
+  usbSeg.disabled = !a.usb_present;
+  usbSeg.style.opacity = a.usb_present ? '' : '.4';
+  usbSeg.title = a.usb_present ? '' : 'No USB drive inserted';
 }
 
 async function pollAttributes() {
   try {
     _attrs = await (await fetch('/api/attributes')).json();
-    renderDevice();
+    updateUsbTab();
+    if (_status) render(_status);   // refresh the combined card with device attrs
   } catch (e) {}
 }
 
@@ -912,23 +941,6 @@ setInterval(poll, POLL_MS);
 </script>
 </body>
 </html>"""
-
-
-# ---------------------------------------------------------------------------
-# Video stream control via SDCP CMD 386
-# ---------------------------------------------------------------------------
-
-def start_video(ip: str, mainboard_id: str, timeout: float = 10.0) -> str | None:
-    """Send Enable=1, return RTSP URL or None on failure."""
-    try:
-        return _printer.start_video_stream(ip, mainboard_id, timeout)
-    except Exception as e:
-        return None
-
-
-def stop_video(ip: str, mainboard_id: str) -> None:
-    """Send Enable=0 to release the printer's one connection slot."""
-    _printer.stop_video_stream(ip, mainboard_id)
 
 
 # ---------------------------------------------------------------------------
@@ -948,10 +960,11 @@ class _HLSTranscoder:
     re-encode, so CPU stays negligible).
     """
 
-    def __init__(self, rtsp_url: str, ip: str, mainboard_id: str):
+    def __init__(self, rtsp_url: str, ip: str, mainboard_id: str, brand_id: str = ""):
         self._url = rtsp_url
         self._ip = ip
         self._mid = mainboard_id
+        self._brand = brand_id
         self._dir = tempfile.mkdtemp(prefix="huygens_hls_")
         self._playlist = os.path.join(self._dir, "stream.m3u8")
         self._stop = threading.Event()
@@ -984,7 +997,7 @@ class _HLSTranscoder:
     def _cleanup(self):
         self._stop.set()
         self._kill_proc()
-        _printer.stop_video_stream(self._ip, self._mid)
+        _printer.stop_video_stream(self._ip, self._mid, brand_id=self._brand)
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def _loop(self):
@@ -1031,9 +1044,11 @@ class _HLSTranscoder:
 # ---------------------------------------------------------------------------
 
 class _StatusPoller:
-    def __init__(self, ip: str, mainboard_id: str, interval: float = 2.5):
+    def __init__(self, ip: str, mainboard_id: str, interval: float = 2.5,
+                 brand_id: str = ""):
         self._ip = ip
         self._mid = mainboard_id
+        self._brand = brand_id
         self._interval = interval
         self._lock = threading.Lock()
         self._data = None
@@ -1044,7 +1059,7 @@ class _StatusPoller:
     def _run(self):
         while True:
             try:
-                s = _printer.get_status(self._ip, self._mid)
+                s = _printer.get_status(self._ip, self._mid, brand_id=self._brand)
                 with self._lock:
                     self._data = s
                     self._offline = False
@@ -1062,9 +1077,11 @@ class _AttributesPoller:
     """Poll the printer's attributes (Cmd 1) on a slow cadence — they change
     rarely (USB inserted, video slots, free space), so 8s is plenty."""
 
-    def __init__(self, ip: str, mainboard_id: str, interval: float = 8.0):
+    def __init__(self, ip: str, mainboard_id: str, interval: float = 8.0,
+                 brand_id: str = ""):
         self._ip = ip
         self._mid = mainboard_id
+        self._brand = brand_id
         self._interval = interval
         self._lock = threading.Lock()
         self._data = None
@@ -1074,7 +1091,7 @@ class _AttributesPoller:
     def _run(self):
         while True:
             try:
-                a = _printer.get_attributes(self._ip, self._mid)
+                a = _printer.get_attributes(self._ip, self._mid, brand_id=self._brand)
                 with self._lock:
                     self._data = a
             except Exception:
@@ -1098,9 +1115,10 @@ class _Uploader:
     reflects the dashboard → printer leg, which is the slow part on a LAN.
     """
 
-    def __init__(self, ip: str, mainboard_id: str):
+    def __init__(self, ip: str, mainboard_id: str, brand_id: str = ""):
         self._ip = ip
         self._mid = mainboard_id
+        self._brand = brand_id
         self._lock = threading.Lock()
         self._state = {"status": "idle", "filename": None,
                        "sent": 0, "total": 0, "error": None}
@@ -1125,7 +1143,8 @@ class _Uploader:
                 self._state["total"] = total
         try:
             _printer.upload_file(self._ip, self._mid, local_path,
-                                 on_progress=on_progress, remote_filename=filename)
+                                 on_progress=on_progress, remote_filename=filename,
+                                 brand_id=self._brand)
             with self._lock:
                 self._state["status"] = "done"
         except Exception as e:
@@ -1149,9 +1168,10 @@ class _Uploader:
 
 def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     app = Flask(__name__)
-    poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"])
-    attrs_poller = _AttributesPoller(cfg["ip"], cfg["mainboard_id"])
-    uploader = _Uploader(cfg["ip"], cfg["mainboard_id"])
+    brand_id = cfg.get("id", "")
+    poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"], brand_id=brand_id)
+    attrs_poller = _AttributesPoller(cfg["ip"], cfg["mainboard_id"], brand_id=brand_id)
+    uploader = _Uploader(cfg["ip"], cfg["mainboard_id"], brand_id=brand_id)
     _hls = [None]  # mutable box so inner functions can reassign
 
     @app.route("/")
@@ -1170,10 +1190,11 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
         if shutil.which("ffmpeg") is None:
             return jsonify({"error": "ffmpeg not found — install it to view the stream"}), 500
         try:
-            url = video_url or _printer.start_video_stream(cfg["ip"], cfg["mainboard_id"])
+            url = video_url or _printer.start_video_stream(
+                cfg["ip"], cfg["mainboard_id"], brand_id=brand_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
-        _hls[0] = _HLSTranscoder(url, cfg["ip"], cfg["mainboard_id"])
+        _hls[0] = _HLSTranscoder(url, cfg["ip"], cfg["mainboard_id"], brand_id)
         return jsonify({"ok": True})
 
     @app.route("/api/video/stop", methods=["POST"])
@@ -1181,7 +1202,7 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
         if _hls[0]:
             _hls[0].stop()
             _hls[0] = None
-        _printer.stop_video_stream(cfg["ip"], cfg["mainboard_id"])
+        _printer.stop_video_stream(cfg["ip"], cfg["mainboard_id"], brand_id=brand_id)
         return jsonify({"ok": True})
 
     @app.route("/api/video/ready")
@@ -1247,7 +1268,7 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
             return jsonify({"error": "No filename provided"}), 400
         try:
             _printer.start_print(cfg["ip"], cfg["mainboard_id"], filename,
-                                 int(body.get("start_layer", 0)))
+                                 int(body.get("start_layer", 0)), brand_id=brand_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         except Exception as e:
@@ -1256,7 +1277,7 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
 
     def _print_action(fn):
         try:
-            fn(cfg["ip"], cfg["mainboard_id"])
+            fn(cfg["ip"], cfg["mainboard_id"], brand_id=brand_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         except Exception as e:
@@ -1279,7 +1300,8 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     def api_files():
         path = request.args.get("path", "/local/")
         try:
-            entries = _printer.list_files(cfg["ip"], cfg["mainboard_id"], path)
+            entries = _printer.list_files(cfg["ip"], cfg["mainboard_id"], path,
+                                          brand_id=brand_id)
         except Exception as e:
             return jsonify({"error": str(e)}), 502
         return jsonify({
@@ -1300,7 +1322,8 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
         if not files and not folders:
             return jsonify({"error": "Nothing to delete"}), 400
         try:
-            failed = _printer.delete_files(cfg["ip"], cfg["mainboard_id"], files, folders)
+            failed = _printer.delete_files(cfg["ip"], cfg["mainboard_id"], files, folders,
+                                           brand_id=brand_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         except Exception as e:

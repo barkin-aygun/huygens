@@ -5,7 +5,7 @@ Neither the CLI nor a future GUI should need to touch _transport directly.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from . import _transport
 
@@ -13,16 +13,13 @@ from . import _transport
 # Cmd constants
 # ---------------------------------------------------------------------------
 
-CMD_STATUS       = 0
 CMD_START_PRINT  = 128
 CMD_PAUSE_PRINT  = 129
 CMD_STOP_PRINT   = 130
 CMD_RESUME_PRINT = 131
-CMD_TERMINATE_TRANSFER = 255
 CMD_LIST_FILES   = 258
 CMD_DELETE_FILES = 259
 CMD_VIDEO        = 386
-CMD_TIMELAPSE    = 387
 
 # ---------------------------------------------------------------------------
 # Ack error map (shared across commands)
@@ -66,12 +63,11 @@ PRINT_STATUS_LABELS = {
 
 PRINT_ERROR_LABELS = {
     0: "None",
-    1: "Temperature too high",
-    2: "Motor fault",
-    4: "Media IO error",
-    8: "Projector fault",
-    16: "Fan fault",
-    32: "Resin level low",
+    1: "File MD5 check failed",
+    2: "File read failed",
+    3: "Resolution mismatch",
+    4: "Format mismatch",
+    5: "Machine model mismatch",
 }
 
 TIMELAPSE_STATUS_LABELS = {
@@ -96,10 +92,6 @@ class PrinterInfo:
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
-
-    @staticmethod
-    def from_dict(d: dict) -> "PrinterInfo":
-        return PrinterInfo(**d)
 
 
 @dataclass
@@ -215,9 +207,11 @@ def discover(timeout: float = 5.0) -> list[PrinterInfo]:
     return printers
 
 
-def get_status(ip: str, mainboard_id: str, timeout: float = 10.0) -> PrintStatus:
+def get_status(
+    ip: str, mainboard_id: str, timeout: float = 10.0, brand_id: str = ""
+) -> PrintStatus:
     """Query the printer's current machine and print status."""
-    raw = _transport.ws_get_status(ip, mainboard_id, timeout)
+    raw = _transport.ws_get_status(ip, mainboard_id, timeout, brand_id)
     print_info = raw.get("PrintInfo", {})
 
     current_status = raw.get("CurrentStatus", [0])
@@ -246,44 +240,49 @@ def start_print(
     filename: str,
     start_layer: int = 0,
     timeout: float = 10.0,
+    brand_id: str = "",
 ) -> None:
     """Start printing a file. Raises ValueError on printer-reported errors."""
     resp = _transport.ws_command(
         ip, mainboard_id, CMD_START_PRINT,
         {"Filename": filename, "StartLayer": start_layer},
-        timeout,
+        timeout, brand_id,
     )
     ack = resp.get("Data", {}).get("Ack", resp.get("Ack", 0))
     if ack != 0:
         raise ValueError(ACK_ERRORS.get(ack, f"Printer error (Ack={ack})"))
 
 
-def _print_control(ip: str, mainboard_id: str, cmd: int, timeout: float) -> None:
+def _print_control(
+    ip: str, mainboard_id: str, cmd: int, timeout: float, brand_id: str = ""
+) -> None:
     """Send a parameterless print-control command (pause/resume/stop)."""
-    resp = _transport.ws_command(ip, mainboard_id, cmd, {}, timeout)
+    resp = _transport.ws_command(ip, mainboard_id, cmd, {}, timeout, brand_id)
     ack = resp.get("Data", {}).get("Ack", resp.get("Ack", 0))
     if ack != 0:
         raise ValueError(ACK_ERRORS.get(ack, f"Printer error (Ack={ack})"))
 
 
-def pause_print(ip: str, mainboard_id: str, timeout: float = 10.0) -> None:
+def pause_print(ip: str, mainboard_id: str, timeout: float = 10.0, brand_id: str = "") -> None:
     """Pause the running print job."""
-    _print_control(ip, mainboard_id, CMD_PAUSE_PRINT, timeout)
+    _print_control(ip, mainboard_id, CMD_PAUSE_PRINT, timeout, brand_id)
 
 
-def resume_print(ip: str, mainboard_id: str, timeout: float = 10.0) -> None:
+def resume_print(ip: str, mainboard_id: str, timeout: float = 10.0, brand_id: str = "") -> None:
     """Resume a paused print job."""
-    _print_control(ip, mainboard_id, CMD_RESUME_PRINT, timeout)
+    _print_control(ip, mainboard_id, CMD_RESUME_PRINT, timeout, brand_id)
 
 
-def stop_print(ip: str, mainboard_id: str, timeout: float = 10.0) -> None:
+def stop_print(ip: str, mainboard_id: str, timeout: float = 10.0, brand_id: str = "") -> None:
     """Stop (cancel) the running print job."""
-    _print_control(ip, mainboard_id, CMD_STOP_PRINT, timeout)
+    _print_control(ip, mainboard_id, CMD_STOP_PRINT, timeout, brand_id)
 
 
-def get_attributes(ip: str, mainboard_id: str, timeout: float = 10.0) -> PrinterAttributes:
+def get_attributes(
+    ip: str, mainboard_id: str, timeout: float = 10.0, brand_id: str = ""
+) -> PrinterAttributes:
     """Query the printer's static-ish attributes (Cmd 1)."""
-    raw = _transport.ws_get_attributes(ip, mainboard_id, timeout)
+    raw = _transport.ws_get_attributes(ip, mainboard_id, timeout, brand_id)
     return PrinterAttributes.from_dict(raw)
 
 
@@ -297,6 +296,7 @@ def upload_file(
     timeout: float = 120.0,
     on_progress=None,
     remote_filename: str | None = None,
+    brand_id: str = "",
 ) -> None:
     """Upload a sliced .goo or .ctb file to the printer's internal storage.
 
@@ -312,7 +312,9 @@ def upload_file(
         raise ValueError(
             f"Unsupported file type: only {', '.join(UPLOAD_EXTENSIONS)} files can be uploaded"
         )
-    _transport.http_upload(ip, mainboard_id, local_path, filename, timeout, on_progress)
+    _transport.http_upload(
+        ip, mainboard_id, local_path, filename, timeout, on_progress, brand_id
+    )
 
 
 VIDEO_ACK_ERRORS = {
@@ -322,9 +324,11 @@ VIDEO_ACK_ERRORS = {
 }
 
 
-def start_video_stream(ip: str, mainboard_id: str, timeout: float = 10.0) -> str:
+def start_video_stream(
+    ip: str, mainboard_id: str, timeout: float = 10.0, brand_id: str = ""
+) -> str:
     """Enable the RTSP stream and return its URL. Raises ValueError on failure."""
-    resp = _transport.ws_command(ip, mainboard_id, CMD_VIDEO, {"Enable": 1}, timeout)
+    resp = _transport.ws_command(ip, mainboard_id, CMD_VIDEO, {"Enable": 1}, timeout, brand_id)
     data = resp.get("Data", resp)
     ack = data.get("Ack", -1)
     if ack != 0:
@@ -335,10 +339,12 @@ def start_video_stream(ip: str, mainboard_id: str, timeout: float = 10.0) -> str
     return url
 
 
-def stop_video_stream(ip: str, mainboard_id: str, timeout: float = 5.0) -> None:
+def stop_video_stream(
+    ip: str, mainboard_id: str, timeout: float = 5.0, brand_id: str = ""
+) -> None:
     """Disable the RTSP stream, releasing the printer's connection slot."""
     try:
-        _transport.ws_command(ip, mainboard_id, CMD_VIDEO, {"Enable": 0}, timeout)
+        _transport.ws_command(ip, mainboard_id, CMD_VIDEO, {"Enable": 0}, timeout, brand_id)
     except Exception:
         pass
 
@@ -348,12 +354,13 @@ def list_files(
     mainboard_id: str,
     path: str = "/local/",
     timeout: float = 10.0,
+    brand_id: str = "",
 ) -> list[FileEntry]:
     """Return files available for printing at the given storage path."""
     resp = _transport.ws_command(
         ip, mainboard_id, CMD_LIST_FILES,
         {"Url": path},
-        timeout,
+        timeout, brand_id,
     )
     entries = []
     for item in resp.get("Data", {}).get("FileList", resp.get("FileList", [])):
@@ -373,6 +380,7 @@ def delete_files(
     file_paths: list[str],
     folder_paths: list[str] | None = None,
     timeout: float = 10.0,
+    brand_id: str = "",
 ) -> list[str]:
     """Delete files (and optionally folders) from the printer's storage.
 
@@ -384,7 +392,7 @@ def delete_files(
     resp = _transport.ws_command(
         ip, mainboard_id, CMD_DELETE_FILES,
         {"FileList": file_paths, "FolderList": folder_paths or []},
-        timeout,
+        timeout, brand_id,
     )
     data = resp.get("Data", resp)
     ack = data.get("Ack", resp.get("Ack", 0))

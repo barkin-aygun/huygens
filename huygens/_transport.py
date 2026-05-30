@@ -44,7 +44,10 @@ def broadcast_discover(timeout: float) -> list[dict]:
             msg = json.loads(data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
-        key = msg.get("Id") or addr[0]
+        # Dedupe on MainboardID — the unique per-board ID. (msg["Id"] is only a
+        # brand identifier per the protocol, so two same-brand printers can
+        # share it; keying on that would silently drop the second one.)
+        key = msg.get("Data", {}).get("MainboardID") or addr[0]
         if key in seen:
             continue
         seen.add(key)
@@ -58,10 +61,15 @@ def broadcast_discover(timeout: float) -> list[dict]:
 # WebSocket helpers
 # ---------------------------------------------------------------------------
 
-def _build_msg(cmd: int, mainboard_id: str, data: dict) -> tuple[str, str]:
+def _build_msg(
+    cmd: int, mainboard_id: str, data: dict, brand_id: str = ""
+) -> tuple[str, str]:
     request_id = uuid.uuid4().hex
     payload = json.dumps({
-        "Id": uuid.uuid4().hex,
+        # Per the protocol "Id" is the machine brand identifier learned at
+        # discovery; echo it back when we have it. Fall back to a random UUID
+        # for callers that never ran discovery (the firmware tolerates either).
+        "Id": brand_id or uuid.uuid4().hex,
         "Data": {
             "Cmd": cmd,
             "Data": data,
@@ -91,9 +99,11 @@ async def _recv_topic(ws, topic: str, request_id: str | None, timeout: float) ->
         return parsed.get("Data", {})
 
 
-async def _ws_status(ip: str, mainboard_id: str, timeout: float) -> dict:
+async def _ws_status(
+    ip: str, mainboard_id: str, timeout: float, brand_id: str = ""
+) -> dict:
     url = f"ws://{ip}:{_WS_PORT}/websocket"
-    payload, _ = _build_msg(0, mainboard_id, {})
+    payload, _ = _build_msg(0, mainboard_id, {}, brand_id)
     topic = f"sdcp/status/{mainboard_id}"
     async with websockets.connect(url, open_timeout=timeout) as ws:
         await ws.send(payload)
@@ -110,10 +120,11 @@ async def _ws_status(ip: str, mainboard_id: str, timeout: float) -> dict:
 
 
 async def _ws_command(
-    ip: str, mainboard_id: str, cmd: int, data: dict, timeout: float
+    ip: str, mainboard_id: str, cmd: int, data: dict, timeout: float,
+    brand_id: str = "",
 ) -> dict:
     url = f"ws://{ip}:{_WS_PORT}/websocket"
-    payload, request_id = _build_msg(cmd, mainboard_id, data)
+    payload, request_id = _build_msg(cmd, mainboard_id, data, brand_id)
     async with websockets.connect(url, open_timeout=timeout) as ws:
         await ws.send(payload)
         resp = await _recv_topic(
@@ -122,13 +133,18 @@ async def _ws_command(
         return resp
 
 
-def ws_get_status(ip: str, mainboard_id: str, timeout: float) -> dict:
-    return asyncio.run(_ws_status(ip, mainboard_id, timeout))
+def ws_get_status(
+    ip: str, mainboard_id: str, timeout: float, brand_id: str = ""
+) -> dict:
+    return asyncio.run(_ws_status(ip, mainboard_id, timeout, brand_id))
 
 
-async def _ws_attributes(ip: str, mainboard_id: str, timeout: float) -> dict:
+async def _ws_attributes(
+    ip: str, mainboard_id: str, timeout: float, brand_id: str = ""
+) -> dict:
     url = f"ws://{ip}:{_WS_PORT}/websocket"
-    payload, _ = _build_msg(1, mainboard_id, {})   # Cmd 1 = attribute request
+    # Cmd 1 = attribute request
+    payload, _ = _build_msg(1, mainboard_id, {}, brand_id)
     topic = f"sdcp/attributes/{mainboard_id}"
     async with websockets.connect(url, open_timeout=timeout) as ws:
         await ws.send(payload)
@@ -144,12 +160,17 @@ async def _ws_attributes(ip: str, mainboard_id: str, timeout: float) -> dict:
             return parsed.get("Attributes", {})
 
 
-def ws_get_attributes(ip: str, mainboard_id: str, timeout: float) -> dict:
-    return asyncio.run(_ws_attributes(ip, mainboard_id, timeout))
+def ws_get_attributes(
+    ip: str, mainboard_id: str, timeout: float, brand_id: str = ""
+) -> dict:
+    return asyncio.run(_ws_attributes(ip, mainboard_id, timeout, brand_id))
 
 
-def ws_command(ip: str, mainboard_id: str, cmd: int, data: dict, timeout: float) -> dict:
-    return asyncio.run(_ws_command(ip, mainboard_id, cmd, data, timeout))
+def ws_command(
+    ip: str, mainboard_id: str, cmd: int, data: dict, timeout: float,
+    brand_id: str = "",
+) -> dict:
+    return asyncio.run(_ws_command(ip, mainboard_id, cmd, data, timeout, brand_id))
 
 
 # ---------------------------------------------------------------------------
@@ -184,13 +205,15 @@ def _upload_error_message(body: dict) -> str:
 
 
 def _terminate_transfer(
-    ip: str, mainboard_id: str, transfer_uuid: str, filename: str
+    ip: str, mainboard_id: str, transfer_uuid: str, filename: str,
+    brand_id: str = "",
 ) -> None:
     """Best-effort CMD 255 so the printer abandons an interrupted transfer."""
     try:
         asyncio.run(_ws_command(
             ip, mainboard_id, _CMD_TERMINATE_TRANSFER,
             {"Uuid": transfer_uuid, "FileName": filename}, timeout=5.0,
+            brand_id=brand_id,
         ))
     except Exception:
         pass
@@ -203,6 +226,7 @@ def http_upload(
     remote_filename: str,
     timeout: float = 120.0,
     on_progress=None,
+    brand_id: str = "",
 ) -> None:
     """Upload a file to the printer in 1 MB packets with a full-file MD5 check.
 
@@ -257,5 +281,5 @@ def http_upload(
                 if on_progress:
                     on_progress(sent, total_size)
     except Exception:
-        _terminate_transfer(ip, mainboard_id, transfer_uuid, remote_filename)
+        _terminate_transfer(ip, mainboard_id, transfer_uuid, remote_filename, brand_id)
         raise
