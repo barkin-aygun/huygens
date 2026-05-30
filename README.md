@@ -6,6 +6,8 @@ network. Discover the printer, check status, browse and upload sliced files,
 start/pause/stop prints, and watch the built-in camera — all without the vendor
 app.
 
+<img width="800" height="600" alt="Screenshot from 2026-05-30 15-04-56" src="https://github.com/user-attachments/assets/5e1afc3a-341e-43c2-bc29-38f399af1285" />
+
 ## Requirements
 
 - Python 3.10+
