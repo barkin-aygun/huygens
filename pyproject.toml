@@ -8,12 +8,13 @@ version = "0.1.0"
 description = "CLI for Elegoo Saturn 4 Ultra 12K (SDCP protocol)"
 requires-python = ">=3.10"
 dependencies = [
-    "av>=12.0",
     "click>=8.1",
     "flask>=3.0",
     "requests>=2.28",
     "websockets>=12.0",
 ]
+# The web dashboard's video stream shells out to the system `ffmpeg` binary
+# (the printer's RTSP feed has non-monotonic timestamps that libav rejects).
 
 [project.scripts]
 huygens = "huygens.cli:cli"

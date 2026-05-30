@@ -3,12 +3,12 @@
 import atexit
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 
-import av as _av
-import requests as _requests
 from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
 
 from . import printer as _printer
@@ -744,10 +744,16 @@ def stop_video(ip: str, mainboard_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 class _HLSTranscoder:
-    """Remux RTSP into HLS segments in a temp directory.
+    """Remux the printer's RTSP feed into HLS segments via the ffmpeg CLI.
 
-    Uses stream-copy (no decode/encode), so CPU overhead is negligible.
-    One RTSP session stays open for the lifetime of the server.
+    We shell out to ffmpeg rather than use PyAV because this printer's stream
+    is awkward in two ways that libav's strict muxer can't tolerate:
+      * its RTSP server only accepts UDP transport (TCP -> "Nonmatching
+        transport in server reply"), and
+      * it emits non-monotonic DTS, which libav rejects outright.
+    ffmpeg auto-corrects the timestamps, and `-use_wallclock_as_timestamps`
+    regenerates clean ~2s segment timing while still stream-copying (no
+    re-encode, so CPU stays negligible).
     """
 
     def __init__(self, rtsp_url: str, ip: str, mainboard_id: str):
@@ -757,6 +763,7 @@ class _HLSTranscoder:
         self._dir = tempfile.mkdtemp(prefix="huygens_hls_")
         self._playlist = os.path.join(self._dir, "stream.m3u8")
         self._stop = threading.Event()
+        self._proc = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         atexit.register(self._cleanup)
@@ -771,46 +778,60 @@ class _HLSTranscoder:
 
     def stop(self):
         self._stop.set()
+        self._kill_proc()
+
+    def _kill_proc(self):
+        p = self._proc
+        if p and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                p.kill()
 
     def _cleanup(self):
         self._stop.set()
+        self._kill_proc()
         _printer.stop_video_stream(self._ip, self._mid)
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def _loop(self):
         while not self._stop.is_set():
             try:
-                self._transcode()
-            except Exception:
+                self._run_ffmpeg()
+            except Exception as e:
                 if not self._stop.is_set():
-                    time.sleep(5)
+                    # Surface the failure instead of looping silently — this is
+                    # how a "Start Stream" that shows nothing becomes debuggable.
+                    print(f"[huygens] HLS ffmpeg error: {e}", file=sys.stderr)
+            if not self._stop.is_set():
+                time.sleep(3)
 
-    def _transcode(self):
-        inc = _av.open(self._url, options={"rtsp_transport": "tcp"})
-        outc = _av.open(
+    def _run_ffmpeg(self):
+        cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", "error",
+            "-rtsp_transport", "udp",
+            "-use_wallclock_as_timestamps", "1",
+            "-i", self._url,
+            "-c", "copy",
+            "-f", "hls",
+            "-hls_time", "2",
+            "-hls_list_size", "5",
+            "-hls_flags", "delete_segments+append_list+omit_endlist",
+            "-hls_segment_filename", os.path.join(self._dir, "seg%05d.ts"),
             self._playlist,
-            mode="w",
-            format="hls",
-            options={
-                "hls_time": "2",
-                "hls_list_size": "5",
-                "hls_flags": "delete_segments+append_list",
-                "hls_segment_filename": os.path.join(self._dir, "seg%05d.ts"),
-            },
+        ]
+        self._proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
-        in_stream = inc.streams.video[0]
-        out_stream = outc.add_stream(template=in_stream)
-        try:
-            for packet in inc.demux(in_stream):
-                if self._stop.is_set():
-                    break
-                if packet.dts is None:
-                    continue
-                packet.stream = out_stream
-                outc.mux(packet)
-        finally:
-            outc.close()
-            inc.close()
+        if self._stop.is_set():            # stop() raced with startup
+            self._kill_proc()
+            return
+        _, err = self._proc.communicate()  # blocks until ffmpeg exits / is killed
+        if not self._stop.is_set() and self._proc.returncode:
+            tail = (err.decode(errors="replace").strip().splitlines() or [""])[-1]
+            raise RuntimeError(f"ffmpeg exited {self._proc.returncode}: {tail}")
 
 
 # ---------------------------------------------------------------------------
@@ -925,6 +946,8 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     def video_start():
         if _hls[0] is not None:
             return jsonify({"ok": True})
+        if shutil.which("ffmpeg") is None:
+            return jsonify({"error": "ffmpeg not found — install it to view the stream"}), 500
         try:
             url = video_url or _printer.start_video_stream(cfg["ip"], cfg["mainboard_id"])
         except ValueError as e:
