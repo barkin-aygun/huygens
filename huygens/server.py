@@ -9,7 +9,7 @@ import time
 
 import av as _av
 import requests as _requests
-from flask import Flask, Response, jsonify, render_template_string, send_from_directory
+from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
 
 from . import printer as _printer
 
@@ -240,7 +240,26 @@ _DASHBOARD = """<!DOCTYPE html>
   </div>
 
   <div class="status-pane" id="status-pane">
-    <div class="card" style="color:var(--muted);text-align:center;padding:32px">Loading…</div>
+    <div class="card">
+      <div class="card-title">Upload</div>
+      <div id="upload-idle">
+        <input type="file" id="upload-input" accept=".goo,.ctb" style="display:none">
+        <button class="stream-btn" style="width:100%;justify-content:center"
+                onclick="document.getElementById('upload-input').click()">
+          <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M8 1.5l4 4h-2.5v5h-3v-5H4l4-4zM3 13h10v1.5H3V13z"/></svg>
+          Choose file…
+        </button>
+      </div>
+      <div id="upload-active" style="display:none">
+        <div class="filename" id="upload-name"></div>
+        <div class="progress-bar-bg"><div class="progress-bar-fill" id="upload-bar" style="width:0%"></div></div>
+        <div class="progress-labels"><span id="upload-detail"></span><span id="upload-pct">0%</span></div>
+      </div>
+      <p id="upload-msg" style="font-size:12px;color:var(--muted);margin-top:8px;min-height:1em"></p>
+    </div>
+    <div id="status-cards">
+      <div class="card" style="color:var(--muted);text-align:center;padding:32px">Loading…</div>
+    </div>
   </div>
 </main>
 
@@ -359,7 +378,7 @@ function render(d) {
     </div>` : ''}
   </div>`;
 
-  document.getElementById('status-pane').innerHTML = html;
+  document.getElementById('status-cards').innerHTML = html;
 }
 
 async function poll() {
@@ -369,7 +388,7 @@ async function poll() {
     const d = await resp.json();
     if (d.error && !d.offline) {
       // No cached data yet — still connecting
-      document.getElementById('status-pane').innerHTML =
+      document.getElementById('status-cards').innerHTML =
         `<div class="card" style="color:var(--muted);text-align:center;padding:32px">${d.error}</div>`;
     } else {
       render(d);
@@ -446,6 +465,94 @@ async function toggleStream() {
 
   btn.disabled = false;
 }
+
+// ── File upload ──
+let _uploadPoll = null;
+
+const uploadInput = document.getElementById('upload-input');
+uploadInput.addEventListener('change', () => {
+  const f = uploadInput.files[0];
+  if (f) startUpload(f);
+  uploadInput.value = '';  // allow re-selecting the same file
+});
+
+function fmtBytes(b) {
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+  if (b >= 1024)    return (b / 1024).toFixed(0) + ' KB';
+  return b + ' B';
+}
+
+function setUploadUI(active, name) {
+  document.getElementById('upload-idle').style.display = active ? 'none' : 'block';
+  document.getElementById('upload-active').style.display = active ? 'block' : 'none';
+  if (active) {
+    document.getElementById('upload-name').textContent = name || '';
+    document.getElementById('upload-bar').style.width = '0%';
+    document.getElementById('upload-pct').textContent = '0%';
+    document.getElementById('upload-detail').textContent = '';
+  }
+}
+
+function uploadMsg(text, kind) {
+  const el = document.getElementById('upload-msg');
+  el.textContent = text;
+  el.style.color = kind === 'error' ? 'var(--red)' : kind === 'ok' ? 'var(--green)' : 'var(--muted)';
+  if (kind) setTimeout(() => {
+    if (el.textContent === text) { el.textContent = ''; el.style.color = 'var(--muted)'; }
+  }, 6000);
+}
+
+async function startUpload(file) {
+  setUploadUI(true, file.name);
+  uploadMsg('Sending to printer…');
+  const fd = new FormData();
+  fd.append('file', file);
+  let resp;
+  try {
+    resp = await fetch('/api/upload', { method: 'POST', body: fd });
+  } catch (e) {
+    return finishUpload('error', 'Upload request failed');
+  }
+  if (!resp.ok) {
+    const d = await resp.json().catch(() => ({}));
+    return finishUpload('error', d.error || ('HTTP ' + resp.status));
+  }
+  pollUpload();
+}
+
+function pollUpload() {
+  if (_uploadPoll) clearInterval(_uploadPoll);
+  _uploadPoll = setInterval(async () => {
+    let s;
+    try { s = await (await fetch('/api/upload/status')).json(); }
+    catch (e) { return; }
+    if (s.status === 'uploading') {
+      setUploadUI(true, s.filename);
+      const pct = s.total ? (s.sent / s.total * 100) : 0;
+      document.getElementById('upload-bar').style.width = pct.toFixed(1) + '%';
+      document.getElementById('upload-pct').textContent = pct.toFixed(0) + '%';
+      document.getElementById('upload-detail').textContent = fmtBytes(s.sent) + ' / ' + fmtBytes(s.total);
+    } else if (s.status === 'done') {
+      finishUpload('ok', 'Uploaded ' + (s.filename || ''));
+    } else if (s.status === 'error') {
+      finishUpload('error', s.error || 'Upload failed');
+    }
+  }, 600);
+}
+
+function finishUpload(kind, msg) {
+  if (_uploadPoll) { clearInterval(_uploadPoll); _uploadPoll = null; }
+  setUploadUI(false);
+  uploadMsg(msg, kind);
+}
+
+// Resume the progress display if an upload is already running (e.g. after a refresh)
+(async () => {
+  try {
+    const s = await (await fetch('/api/upload/status')).json();
+    if (s.status === 'uploading') { setUploadUI(true, s.filename); pollUpload(); }
+  } catch (e) {}
+})();
 
 poll();
 setInterval(poll, POLL_MS);
@@ -578,12 +685,69 @@ class _StatusPoller:
 
 
 # ---------------------------------------------------------------------------
+# Background file uploader (one upload at a time)
+# ---------------------------------------------------------------------------
+
+class _Uploader:
+    """Forward a file to the printer in a background thread, tracking progress.
+
+    The browser POSTs the file to the dashboard, which saves it to a temp file
+    and streams it on to the printer via the SDCP HTTP endpoint. Progress here
+    reflects the dashboard → printer leg, which is the slow part on a LAN.
+    """
+
+    def __init__(self, ip: str, mainboard_id: str):
+        self._ip = ip
+        self._mid = mainboard_id
+        self._lock = threading.Lock()
+        self._state = {"status": "idle", "filename": None,
+                       "sent": 0, "total": 0, "error": None}
+        self._thread = None
+
+    def start(self, local_path: str, filename: str) -> bool:
+        """Begin an upload. Returns False if one is already running."""
+        with self._lock:
+            if self._state["status"] == "uploading":
+                return False
+            self._state = {"status": "uploading", "filename": filename,
+                           "sent": 0, "total": os.path.getsize(local_path), "error": None}
+        self._thread = threading.Thread(
+            target=self._run, args=(local_path, filename), daemon=True)
+        self._thread.start()
+        return True
+
+    def _run(self, local_path: str, filename: str):
+        def on_progress(sent, total):
+            with self._lock:
+                self._state["sent"] = sent
+                self._state["total"] = total
+        try:
+            _printer.upload_file(self._ip, self._mid, local_path, on_progress=on_progress)
+            with self._lock:
+                self._state["status"] = "done"
+        except Exception as e:
+            with self._lock:
+                self._state["status"] = "error"
+                self._state["error"] = str(e)
+        finally:
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+
+    def status(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+
+# ---------------------------------------------------------------------------
 # Flask app factory
 # ---------------------------------------------------------------------------
 
 def create_app(cfg: dict, video_url: str | None = None) -> Flask:
     app = Flask(__name__)
     poller = _StatusPoller(cfg["ip"], cfg["mainboard_id"])
+    uploader = _Uploader(cfg["ip"], cfg["mainboard_id"])
     _hls = [None]  # mutable box so inner functions can reassign
 
     @app.route("/")
@@ -621,6 +785,27 @@ def create_app(cfg: dict, video_url: str | None = None) -> Flask:
         if not _hls[0].ready:
             return "Stream not ready yet", 503
         return send_from_directory(_hls[0].directory, filename)
+
+    @app.route("/api/upload", methods=["POST"])
+    def api_upload():
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return jsonify({"error": "No file provided"}), 400
+        filename = os.path.basename(f.filename)
+        if not filename.lower().endswith(_printer.UPLOAD_EXTENSIONS):
+            exts = ", ".join(_printer.UPLOAD_EXTENSIONS)
+            return jsonify({"error": f"Only {exts} files can be uploaded"}), 400
+        fd, tmp_path = tempfile.mkstemp(prefix="huygens_upload_")
+        os.close(fd)
+        f.save(tmp_path)
+        if not uploader.start(tmp_path, filename):
+            os.remove(tmp_path)
+            return jsonify({"error": "An upload is already in progress"}), 409
+        return jsonify({"ok": True})
+
+    @app.route("/api/upload/status")
+    def api_upload_status():
+        return jsonify(uploader.status())
 
     @app.route("/api/status")
     def api_status():

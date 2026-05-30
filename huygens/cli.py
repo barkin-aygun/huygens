@@ -268,14 +268,16 @@ def serve(port, host, video_url, open_browser):
 
 @cli.command()
 @click.argument("file", type=click.Path(exists=True, readable=True, dir_okay=False))
-@click.option("--dest", "-d", default="/local/", show_default=True,
-              help="Destination directory on the printer.")
 @click.option("--timeout", "-t", default=120.0, show_default=True,
-              help="Seconds to wait for the upload to complete.")
-def upload(file, dest, timeout):
-    """Upload FILE (.ctb) to the printer's storage."""
-    cfg = _resolve_printer()
+              help="Seconds to wait for each 1 MB packet.")
+def upload(file, timeout):
+    """Upload FILE (a sliced .goo or .ctb) to the printer's internal storage."""
     filename = os.path.basename(file)
+    if not filename.lower().endswith(printer.UPLOAD_EXTENSIONS):
+        raise SystemExit(
+            f"Unsupported file type: only {', '.join(printer.UPLOAD_EXTENSIONS)} files can be uploaded."
+        )
+    cfg = _resolve_printer()
     file_size = os.path.getsize(file)
     size_mb = file_size / (1024 * 1024)
 
@@ -289,7 +291,7 @@ def upload(file, dest, timeout):
             last[0] = sent
 
         try:
-            printer.upload_file(cfg["ip"], file, dest, timeout, on_progress)
+            printer.upload_file(cfg["ip"], cfg["mainboard_id"], file, timeout, on_progress)
         except TimeoutError:
             raise SystemExit("Upload timed out.")
         except OSError as e:

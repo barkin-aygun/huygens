@@ -18,6 +18,7 @@ CMD_START_PRINT  = 128
 CMD_PAUSE_PRINT  = 129
 CMD_STOP_PRINT   = 130
 CMD_RESUME_PRINT = 131
+CMD_TERMINATE_TRANSFER = 255
 CMD_LIST_FILES   = 258
 CMD_DELETE_FILES = 259
 CMD_VIDEO        = 386
@@ -224,16 +225,29 @@ def start_print(
         raise ValueError(ACK_ERRORS.get(ack, f"Printer error (Ack={ack})"))
 
 
+UPLOAD_EXTENSIONS = (".goo", ".ctb")
+
+
 def upload_file(
     ip: str,
+    mainboard_id: str,
     local_path: str,
-    remote_dir: str = "/local/",
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     on_progress=None,
 ) -> None:
-    """Upload a .ctb file to the printer's storage."""
+    """Upload a sliced .goo or .ctb file to the printer's internal storage.
+
+    The file is streamed to the SDCP HTTP endpoint in 1 MB packets with a
+    full-file MD5 checksum. `on_progress(sent_bytes, total_bytes)` is called
+    after each packet. Raises ValueError for an unsupported file type and
+    RuntimeError if the printer rejects the upload.
+    """
     filename = os.path.basename(local_path)
-    _transport.http_upload(ip, local_path, filename, timeout, on_progress)
+    if not filename.lower().endswith(UPLOAD_EXTENSIONS):
+        raise ValueError(
+            f"Unsupported file type: only {', '.join(UPLOAD_EXTENSIONS)} files can be uploaded"
+        )
+    _transport.http_upload(ip, mainboard_id, local_path, filename, timeout, on_progress)
 
 
 VIDEO_ACK_ERRORS = {

@@ -131,47 +131,106 @@ def ws_command(ip: str, mainboard_id: str, cmd: int, data: dict, timeout: float)
 
 
 # ---------------------------------------------------------------------------
-# HTTP file upload
+# HTTP file upload (SDCP "Send File" interface)
 # ---------------------------------------------------------------------------
 
-_HTTP_PORT = 58883
-_UPLOAD_PATH = "/upload"
+_HTTP_PORT = 3030                     # same port as the websocket service
+_UPLOAD_PATH = "/uploadFile/upload"
+_CHUNK_SIZE = 1024 * 1024             # 1 MB per packet, per the SDCP spec
+_CMD_TERMINATE_TRANSFER = 255
+
+
+def _file_md5(path: str) -> str:
+    """Stream the file through MD5 so we never hold the whole thing in memory."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(_CHUNK_SIZE), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _upload_error_message(body: dict) -> str:
+    """Build a human-readable error from an SDCP failure response body."""
+    parts = []
+    for m in body.get("messages") or []:
+        if isinstance(m, dict):
+            field, message = m.get("field", ""), m.get("message", "")
+            parts.append(f"{field}: {message}".strip(": ").strip())
+    detail = "; ".join(p for p in parts if p)
+    code = body.get("code", "?")
+    return f"Printer rejected upload (code {code})" + (f": {detail}" if detail else "")
+
+
+def _terminate_transfer(
+    ip: str, mainboard_id: str, transfer_uuid: str, filename: str
+) -> None:
+    """Best-effort CMD 255 so the printer abandons an interrupted transfer."""
+    try:
+        asyncio.run(_ws_command(
+            ip, mainboard_id, _CMD_TERMINATE_TRANSFER,
+            {"Uuid": transfer_uuid, "FileName": filename}, timeout=5.0,
+        ))
+    except Exception:
+        pass
 
 
 def http_upload(
     ip: str,
+    mainboard_id: str,
     local_path: str,
     remote_filename: str,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     on_progress=None,
 ) -> None:
+    """Upload a file to the printer in 1 MB packets with a full-file MD5 check.
+
+    `timeout` applies per packet. On any failure the partial transfer is
+    terminated (CMD 255) so the printer is not left waiting, then the error
+    is re-raised.
+    """
     import requests
 
     url = f"http://{ip}:{_HTTP_PORT}{_UPLOAD_PATH}"
-    file_size = os.path.getsize(local_path)
-    sent = [0]
+    total_size = os.path.getsize(local_path)
+    file_md5 = _file_md5(local_path)
+    transfer_uuid = uuid.uuid4().hex
 
-    class _ProgressFile:
-        def __init__(self, f):
-            self._f = f
+    sent = 0
+    try:
+        with open(local_path, "rb") as f:
+            while True:
+                offset = sent
+                chunk = f.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                resp = requests.post(
+                    url,
+                    data={
+                        "S-File-MD5": file_md5,
+                        "Check": "1",
+                        "Offset": str(offset),
+                        "Uuid": transfer_uuid,
+                        "TotalSize": str(total_size),
+                    },
+                    files={"File": (remote_filename, chunk, "application/octet-stream")},
+                    timeout=timeout,
+                )
+                if not resp.ok:
+                    raise RuntimeError(
+                        f"Upload failed: HTTP {resp.status_code} — {resp.text[:200]}"
+                    )
+                try:
+                    body = resp.json()
+                except ValueError:
+                    raise RuntimeError(
+                        f"Upload failed: unexpected response — {resp.text[:200]}"
+                    )
+                if not body.get("success"):
+                    raise RuntimeError(_upload_error_message(body))
 
-        def read(self, size=-1):
-            chunk = self._f.read(size)
-            sent[0] += len(chunk)
-            if on_progress and chunk:
-                on_progress(sent[0], file_size)
-            return chunk
-
-    with open(local_path, "rb") as f:
-        md5 = hashlib.md5(f.read()).hexdigest()
-        f.seek(0)
-        wrapped = _ProgressFile(f)
-        resp = requests.post(
-            url,
-            files={"file": (remote_filename, wrapped, "application/octet-stream")},
-            data={"md5": md5, "check": "1"},
-            timeout=timeout,
-        )
-
-    if not resp.ok:
-        raise RuntimeError(f"Upload failed: HTTP {resp.status_code} — {resp.text[:200]}")
+                sent += len(chunk)
+                if on_progress:
+                    on_progress(sent, total_size)
+    except Exception:
+        _terminate_transfer(ip, mainboard_id, transfer_uuid, remote_filename)
+        raise
