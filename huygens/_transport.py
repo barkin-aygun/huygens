@@ -197,13 +197,16 @@ def http_upload(
 
     sent = 0
     try:
-        with open(local_path, "rb") as f:
+        # One Session => one keep-alive TCP connection reused for every packet,
+        # instead of a fresh handshake per 1 MB chunk. On the printer's slow,
+        # high-latency WiFi link that per-packet setup is the avoidable cost.
+        with open(local_path, "rb") as f, requests.Session() as session:
             while True:
                 offset = sent
                 chunk = f.read(_CHUNK_SIZE)
                 if not chunk:
                     break
-                resp = requests.post(
+                resp = session.post(
                     url,
                     data={
                         "S-File-MD5": file_md5,
